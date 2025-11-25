@@ -1,0 +1,5 @@
+{
+  "name": "Voxel Verse AI",
+  "description": "A voxel-based sandbox game enhanced with Gemini AI to help you build structures and answer questions about the world.",
+  "requestFramePermissions": []
+}
