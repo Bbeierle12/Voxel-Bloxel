@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } f
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, Entity } from '../types';
+import { getPhysicsSystem } from '../services/gpuPhysics';
 
 // Texture Generation Utility
 function createTexture(color: string, noiseIntensity = 20) {
@@ -102,12 +103,27 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
     
     // Entity meshes tracking
     const entityMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
-    
+
     // Game State stored in refs to avoid re-renders
-    const chunksRef = useRef<Record<string, THREE.Mesh>>({});
+    // Block data: maps position key -> {typeIndex, instanceIndex}
+    const blockDataRef = useRef<Map<string, {typeIndex: number, instanceIndex: number}>>(new Map());
+    // Legacy chunksRef for collision detection - stores block existence and type
+    const chunksRef = useRef<Record<string, {typeId: number, x: number, y: number, z: number}>>({});
+    // InstancedMesh for each block type
+    const instancedMeshesRef = useRef<THREE.InstancedMesh[]>([]);
+    // Track instance counts per block type
+    const instanceCountsRef = useRef<number[]>([]);
+    // Max instances per block type
+    const MAX_INSTANCES = 100000;
+    // Temp matrix for instance updates
+    const tempMatrix = useRef(new THREE.Matrix4());
+    const tempPosition = useRef(new THREE.Vector3());
+
     const objectsRef = useRef<THREE.Object3D[]>([]);
     const keysRef = useRef<{ [key: string]: boolean }>({});
     const isLockedRef = useRef(false);
+    // GPU Physics system for fast collision detection
+    const physicsSystemRef = useRef(getPhysicsSystem());
     // frameIdRef is no longer needed with setAnimationLoop
     const boxGeometryRef = useRef(new THREE.BoxGeometry(1, 1, 1));
     const selectedBlockRef = useRef(selectedBlockIndex); 
@@ -127,44 +143,97 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
     const getKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
     const addBlock = (x: number, y: number, z: number, typeIndex: number, isWorldGen = false) => {
-        if (!sceneRef.current) return;
+        if (!sceneRef.current || instancedMeshesRef.current.length === 0) return;
         const key = getKey(x, y, z);
-        if (chunksRef.current[key]) return; // Exists
+        if (blockDataRef.current.has(key)) return; // Exists
 
         // Safety check for array bounds
         const blockType = BLOCK_TYPES[typeIndex];
-        if(!blockType) return;
+        if (!blockType) return;
+
+        // Check if we have room for more instances
+        if (instanceCountsRef.current[typeIndex] >= MAX_INSTANCES) {
+            console.warn(`Max instances reached for block type ${typeIndex}`);
+            return;
+        }
 
         // Inventory Check for player placement
         if (!isWorldGen) {
-             if (!checkCanPlaceRef.current(blockType.id)) return;
-             onBlockPlaceRef.current(blockType.id);
+            if (!checkCanPlaceRef.current(blockType.id)) return;
+            onBlockPlaceRef.current(blockType.id);
         }
 
-        const mesh = new THREE.Mesh(boxGeometryRef.current, blockType.mat);
-        mesh.position.set(x, y, z);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        // IMPORTANT: Store the ItemType ID, not the array index
-        mesh.userData = { isBlock: true, key: key, x, y, z, typeId: blockType.id };
+        // Get the next instance index for this block type
+        const instanceIndex = instanceCountsRef.current[typeIndex];
+        instanceCountsRef.current[typeIndex]++;
 
-        sceneRef.current.add(mesh);
-        chunksRef.current[key] = mesh;
-        objectsRef.current.push(mesh);
+        // Set the instance matrix
+        tempMatrix.current.setPosition(x, y, z);
+        instancedMeshesRef.current[typeIndex].setMatrixAt(instanceIndex, tempMatrix.current);
+        instancedMeshesRef.current[typeIndex].instanceMatrix.needsUpdate = true;
+        instancedMeshesRef.current[typeIndex].count = instanceCountsRef.current[typeIndex];
+
+        // Store block data for collision and removal
+        blockDataRef.current.set(key, { typeIndex, instanceIndex });
+        chunksRef.current[key] = { typeId: blockType.id, x, y, z };
+
+        // Update physics system for collision detection
+        physicsSystemRef.current.setBlock(x, y, z);
     };
 
-    const removeBlock = (mesh: THREE.Mesh) => {
-        if (!sceneRef.current) return;
-        sceneRef.current.remove(mesh);
-        const key = mesh.userData.key;
-        delete chunksRef.current[key];
-        const idx = objectsRef.current.indexOf(mesh);
-        if (idx > -1) objectsRef.current.splice(idx, 1);
-        
+    const removeBlockAt = (x: number, y: number, z: number) => {
+        const key = getKey(x, y, z);
+        const blockData = blockDataRef.current.get(key);
+        if (!blockData) return;
+
+        const { typeIndex, instanceIndex } = blockData;
+        const instancedMesh = instancedMeshesRef.current[typeIndex];
+        const lastIndex = instanceCountsRef.current[typeIndex] - 1;
+
         // Notify inventory
-        if (mesh.userData.typeId) {
-            onBlockBreakRef.current(mesh.userData.typeId);
+        const chunkData = chunksRef.current[key];
+        if (chunkData?.typeId) {
+            onBlockBreakRef.current(chunkData.typeId);
         }
+
+        // If not the last instance, swap with last instance
+        if (instanceIndex !== lastIndex) {
+            // Get the last instance's matrix
+            const lastMatrix = new THREE.Matrix4();
+            instancedMesh.getMatrixAt(lastIndex, lastMatrix);
+
+            // Move it to the removed position
+            instancedMesh.setMatrixAt(instanceIndex, lastMatrix);
+
+            // Find and update the block data for the swapped instance
+            const lastPosition = new THREE.Vector3();
+            lastPosition.setFromMatrixPosition(lastMatrix);
+            const lastKey = getKey(
+                Math.round(lastPosition.x),
+                Math.round(lastPosition.y),
+                Math.round(lastPosition.z)
+            );
+            const lastBlockData = blockDataRef.current.get(lastKey);
+            if (lastBlockData) {
+                lastBlockData.instanceIndex = instanceIndex;
+            }
+        }
+
+        // Hide the last instance by setting scale to 0
+        tempMatrix.current.makeScale(0, 0, 0);
+        instancedMesh.setMatrixAt(lastIndex, tempMatrix.current);
+
+        // Decrement count
+        instanceCountsRef.current[typeIndex]--;
+        instancedMesh.count = instanceCountsRef.current[typeIndex];
+        instancedMesh.instanceMatrix.needsUpdate = true;
+
+        // Remove from data structures
+        blockDataRef.current.delete(key);
+        delete chunksRef.current[key];
+
+        // Update physics system
+        physicsSystemRef.current.removeBlock(x, y, z);
     };
 
     const requestLock = () => {
@@ -301,6 +370,21 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         sunLight.shadow.camera.top = d;
         sunLight.shadow.camera.bottom = -d;
         scene.add(sunLight);
+
+        // --- Create InstancedMeshes for each block type ---
+        const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
+        instancedMeshesRef.current = BLOCK_TYPES.map((blockType, index) => {
+            const instancedMesh = new THREE.InstancedMesh(boxGeometry, blockType.mat, MAX_INSTANCES);
+            instancedMesh.count = 0; // Start with 0 visible instances
+            instancedMesh.castShadow = true;
+            instancedMesh.receiveShadow = true;
+            instancedMesh.frustumCulled = false; // Disable frustum culling for now (can optimize later)
+            scene.add(instancedMesh);
+            return instancedMesh;
+        });
+        // Initialize instance counts
+        instanceCountsRef.current = BLOCK_TYPES.map(() => 0);
+        console.log(`Created ${BLOCK_TYPES.length} InstancedMeshes with max ${MAX_INSTANCES} instances each`);
 
         // --- AI Orb Creation ---
         const orbGroup = new THREE.Group();
@@ -523,18 +607,36 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
 
         const handleMouseDown = (e: MouseEvent) => {
             if (!isLockedRef.current || !cameraRef.current) return;
-            
+
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(new THREE.Vector2(0, 0), cameraRef.current);
-            const intersects = raycaster.intersectObjects(objectsRef.current);
+
+            // Raycast against all instanced meshes
+            const intersects = raycaster.intersectObjects(instancedMeshesRef.current);
 
             if (intersects.length > 0) {
                 const intersect = intersects[0];
                 if (intersect.distance > 8) return;
 
+                // Get the hit block's position from the instance matrix
+                const instancedMesh = intersect.object as THREE.InstancedMesh;
+                const instanceId = intersect.instanceId;
+                if (instanceId === undefined) return;
+
+                const hitMatrix = new THREE.Matrix4();
+                instancedMesh.getMatrixAt(instanceId, hitMatrix);
+                const hitPosition = new THREE.Vector3();
+                hitPosition.setFromMatrixPosition(hitMatrix);
+
+                const blockX = Math.round(hitPosition.x);
+                const blockY = Math.round(hitPosition.y);
+                const blockZ = Math.round(hitPosition.z);
+
                 if (e.button === 0) {
-                    removeBlock(intersect.object as THREE.Mesh);
+                    // Left click - remove block
+                    removeBlockAt(blockX, blockY, blockZ);
                 } else if (e.button === 2) {
+                    // Right click - place block adjacent to hit face
                     const p = intersect.point;
                     const n = intersect.face!.normal;
                     const nx = Math.floor(p.x + n.x * 0.5);
@@ -590,24 +692,16 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         const CAM_OFFSET = 1.6; // Eyes are 1.6m above feet
 
         // Robust AABB check for capsule-like collision
+        // Fast O(1) collision check using typed array spatial grid
         const checkIntersection = (pos: THREE.Vector3) => {
-            const minX = Math.floor(pos.x - PLAYER_RADIUS);
-            const maxX = Math.floor(pos.x + PLAYER_RADIUS);
-            const minZ = Math.floor(pos.z - PLAYER_RADIUS);
-            const maxZ = Math.floor(pos.z + PLAYER_RADIUS);
-            
-            // Check from feet up to head
-            const minY = Math.floor(pos.y - CAM_OFFSET + 0.05); // +epsilon to avoid floor triggers when standing
-            const maxY = Math.floor(pos.y - CAM_OFFSET + PLAYER_HEIGHT - 0.05); // -epsilon for head clearance
-
-            for (let x = minX; x <= maxX; x++) {
-                for (let z = minZ; z <= maxZ; z++) {
-                    for (let y = minY; y <= maxY; y++) {
-                        if (chunksRef.current[getKey(x, y, z)]) return true;
-                    }
-                }
-            }
-            return false;
+            return physicsSystemRef.current.checkCollision(
+                pos.x,
+                pos.y,
+                pos.z,
+                PLAYER_RADIUS,
+                PLAYER_HEIGHT,
+                CAM_OFFSET
+            );
         };
 
         // --- Game Loop using setAnimationLoop ---
@@ -849,7 +943,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             if (time - lastTime >= 1000) {
                 onStatsUpdate({
                     fps: frameCount,
-                    blockCount: objectsRef.current.length,
+                    blockCount: blockDataRef.current.size,
                     entityCount: 0,
                     x: Math.floor(cameraRef.current.position.x),
                     y: Math.floor(cameraRef.current.position.y),
