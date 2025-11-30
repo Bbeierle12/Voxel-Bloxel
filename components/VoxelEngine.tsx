@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import * as THREE from 'three';
+import { WebGPURenderer } from 'three/webgpu';
 import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, Entity } from '../types';
 
 // Texture Generation Utility
@@ -223,7 +224,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             console.log('Container ref is null!');
             return;
         }
-        
+
         // Prevent double initialization
         if (rendererRef.current) {
             console.log('Renderer already exists, skipping initialization');
@@ -231,7 +232,9 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         }
 
         let isMounted = true;
+        let cleanupFn: (() => void) | undefined;
 
+        const initEngine = async () => {
         try {
             console.log('Initializing Three.js scene...');
             // --- Init Three.js ---
@@ -245,16 +248,41 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             camera.position.set(0, 10, 0);
             cameraRef.current = camera;
 
-            console.log('Creating WebGL renderer...');
-            // Use WebGLRenderer (more compatible than WebGPU)
-            const renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.shadowMap.enabled = true;
-            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            // Create renderer - try WebGPU first, fallback to WebGL
+            let renderer: WebGPURenderer | THREE.WebGLRenderer;
+
+            const initRenderer = async () => {
+                if (navigator.gpu) {
+                    try {
+                        console.log('WebGPU available, initializing...');
+                        const webgpuRenderer = new WebGPURenderer({ antialias: true });
+                        await webgpuRenderer.init();
+                        webgpuRenderer.setSize(window.innerWidth, window.innerHeight);
+                        webgpuRenderer.setPixelRatio(window.devicePixelRatio);
+                        console.log('WebGPU renderer created successfully');
+                        return webgpuRenderer;
+                    } catch (e) {
+                        console.warn('WebGPU init failed, falling back to WebGL:', e);
+                    }
+                }
+
+                console.log('Using WebGL renderer fallback...');
+                const webglRenderer = new THREE.WebGLRenderer({ antialias: true });
+                webglRenderer.setSize(window.innerWidth, window.innerHeight);
+                webglRenderer.setPixelRatio(window.devicePixelRatio);
+                webglRenderer.shadowMap.enabled = true;
+                webglRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                console.log('WebGL renderer created successfully');
+                return webglRenderer;
+            };
+
+            renderer = await initRenderer();
+            if (!isMounted) {
+                renderer.dispose();
+                return;
+            }
             containerRef.current.appendChild(renderer.domElement);
             rendererRef.current = renderer;
-            console.log('WebGL renderer created successfully');
 
             // Lights
             const ambientLight = new THREE.AmbientLight(0xaaaaaa, 0.6);
@@ -838,7 +866,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         console.log('Starting animation loop...');
         let frameId = requestAnimationFrame(animate);
 
-        return () => {
+        cleanupFn = () => {
             isMounted = false;
             cancelAnimationFrame(frameId);
             window.removeEventListener('resize', handleResize);
@@ -847,11 +875,11 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             document.removeEventListener('mousemove', handleMouseMove);
             document.removeEventListener('mousedown', handleMouseDown);
             document.removeEventListener('pointerlockchange', handlePointerLockChange);
-            
+
             if (rendererRef.current) {
                 rendererRef.current.dispose();
             }
-            
+
             if (rendererRef.current && containerRef.current) {
                 try {
                     containerRef.current.removeChild(rendererRef.current.domElement);
@@ -860,8 +888,15 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         };
         } catch (error) {
             console.error('VoxelEngine initialization error:', error);
-            return () => {}; // Empty cleanup
         }
+        };
+
+        initEngine();
+
+        return () => {
+            isMounted = false;
+            if (cleanupFn) cleanupFn();
+        };
     }, []); 
 
     return (
