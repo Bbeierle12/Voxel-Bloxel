@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, Entity } from '../types';
+import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, Entity, QuantumOrbState, QuantumPhase } from '../types';
 import { getPhysicsSystem } from '../services/gpuPhysics';
 
 // Texture Generation Utility
@@ -79,9 +79,10 @@ interface VoxelEngineProps {
     selectedBlockIndex: number; // Maps to BLOCK_TYPES index
     orbState?: OrbState;
     entities?: Entity[];
+    quantumState?: QuantumOrbState;
 }
 
-const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex, orbState, entities = [] }, ref) => {
+const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex, orbState, entities = [], quantumState }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -93,14 +94,20 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         speed: 8,
         jumpForce: 13
     });
-    
+
     // AI Orb refs
     const orbGroupRef = useRef<THREE.Group | null>(null);
     const orbMeshRef = useRef<THREE.Mesh | null>(null);
     const orbGlowRef = useRef<THREE.PointLight | null>(null);
     const orbScanConeRef = useRef<THREE.Mesh | null>(null);
     const orbStateRef = useRef<OrbState | undefined>(orbState);
-    
+
+    // Quantum Orb refs
+    const quantumOrbGroupRef = useRef<THREE.Group | null>(null);
+    const quantumOrbMeshesRef = useRef<Map<string, { mesh: THREE.Mesh, glow: THREE.PointLight, ring: THREE.Mesh }>>(new Map());
+    const quantumBeamsRef = useRef<THREE.Line[]>([]);
+    const quantumStateRef = useRef<QuantumOrbState | undefined>(quantumState);
+
     // Entity meshes tracking
     const entityMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
 
@@ -138,7 +145,8 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         onBlockPlaceRef.current = onBlockPlace;
         onBlockBreakRef.current = onBlockBreak;
         orbStateRef.current = orbState;
-    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak, orbState]);
+        quantumStateRef.current = quantumState;
+    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak, orbState, quantumState]);
 
     const getKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
@@ -440,6 +448,11 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         scanCone.visible = false;
         orbGroup.add(scanCone);
         orbScanConeRef.current = scanCone;
+
+        // --- Quantum Orb Group (for split orbs) ---
+        const quantumOrbGroup = new THREE.Group();
+        scene.add(quantumOrbGroup);
+        quantumOrbGroupRef.current = quantumOrbGroup;
 
         // --- Sky System (Stars & Clouds) ---
         const skyGroup = new THREE.Group();
@@ -842,8 +855,149 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                         orbScanConeRef.current.visible = true;
                         orbScanConeRef.current.rotation.y += delta * 2;
                         // Pulsing opacity
-                        (orbScanConeRef.current.material as THREE.MeshBasicMaterial).opacity = 
+                        (orbScanConeRef.current.material as THREE.MeshBasicMaterial).opacity =
                             0.1 + Math.sin(totalTime * 4) * 0.05;
+                    }
+                }
+            }
+
+            // --- Quantum Orb Animation ---
+            const currentQuantumState = quantumStateRef.current;
+            if (quantumOrbGroupRef.current && currentQuantumState) {
+                const qGroup = quantumOrbGroupRef.current;
+
+                // Hide main orb when in quantum split
+                if (orbGroupRef.current) {
+                    orbGroupRef.current.visible = !currentQuantumState.isQuantumSplit;
+                }
+
+                // Manage quantum orb copies
+                if (currentQuantumState.isQuantumSplit && currentQuantumState.copies.length > 0) {
+                    const copies = currentQuantumState.copies;
+                    const coherence = currentQuantumState.coherenceLevel;
+
+                    // Create/update orb meshes for each copy
+                    copies.forEach((copy, idx) => {
+                        let orbData = quantumOrbMeshesRef.current.get(copy.id);
+
+                        // Create if doesn't exist
+                        if (!orbData) {
+                            // Create orb mesh
+                            const qOrbGeometry = new THREE.IcosahedronGeometry(0.35, 2);
+                            const qOrbMaterial = new THREE.MeshStandardMaterial({
+                                color: copy.color,
+                                emissive: copy.color,
+                                emissiveIntensity: 0.6,
+                                metalness: 0.7,
+                                roughness: 0.3,
+                                transparent: true,
+                                opacity: 0.85 * coherence
+                            });
+                            const qOrbMesh = new THREE.Mesh(qOrbGeometry, qOrbMaterial);
+                            qOrbMesh.castShadow = true;
+                            qGroup.add(qOrbMesh);
+
+                            // Create glow light
+                            const qGlow = new THREE.PointLight(copy.color, 2, 8);
+                            qGroup.add(qGlow);
+
+                            // Create progress ring
+                            const ringGeometry = new THREE.RingGeometry(0.5, 0.6, 32);
+                            const ringMaterial = new THREE.MeshBasicMaterial({
+                                color: 0x22c55e,
+                                transparent: true,
+                                opacity: 0.6,
+                                side: THREE.DoubleSide
+                            });
+                            const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+                            ring.rotation.x = -Math.PI / 2;
+                            qGroup.add(ring);
+
+                            orbData = { mesh: qOrbMesh, glow: qGlow, ring };
+                            quantumOrbMeshesRef.current.set(copy.id, orbData);
+                        }
+
+                        // Update position with floating animation
+                        const floatOffset = Math.sin(totalTime * 2 + idx * 0.5) * 0.2;
+                        orbData.mesh.position.set(
+                            copy.position.x,
+                            copy.position.y + floatOffset,
+                            copy.position.z
+                        );
+                        orbData.glow.position.copy(orbData.mesh.position);
+                        orbData.ring.position.set(
+                            copy.position.x,
+                            copy.position.y - 0.5 + floatOffset,
+                            copy.position.z
+                        );
+
+                        // Update material based on status and coherence
+                        const qMat = orbData.mesh.material as THREE.MeshStandardMaterial;
+                        qMat.opacity = 0.85 * coherence;
+
+                        // Status-based coloring
+                        if (copy.status === 'working') {
+                            qMat.emissiveIntensity = 0.6 + Math.sin(totalTime * 4) * 0.2;
+                            orbData.glow.intensity = 3;
+                            orbData.mesh.rotation.y += delta * 3;
+                        } else if (copy.status === 'complete') {
+                            qMat.emissive.setHex(0x22c55e);
+                            qMat.emissiveIntensity = 0.8;
+                            orbData.glow.color.setHex(0x22c55e);
+                        } else if (copy.status === 'blocked') {
+                            qMat.emissive.setHex(0xeab308);
+                            qMat.emissiveIntensity = 0.4 + Math.sin(totalTime * 8) * 0.3;
+                            orbData.glow.color.setHex(0xeab308);
+                        }
+
+                        // Update progress ring scale
+                        const progressScale = copy.progress / 100;
+                        orbData.ring.scale.set(progressScale, progressScale, 1);
+                        orbData.ring.visible = copy.status === 'working';
+                    });
+
+                    // Create entanglement beams between copies
+                    // Remove old beams
+                    quantumBeamsRef.current.forEach(beam => qGroup.remove(beam));
+                    quantumBeamsRef.current = [];
+
+                    // Draw new beams
+                    if (copies.length > 1) {
+                        for (let i = 0; i < copies.length; i++) {
+                            const nextIdx = (i + 1) % copies.length;
+                            const copy1 = copies[i];
+                            const copy2 = copies[nextIdx];
+
+                            const points = [
+                                new THREE.Vector3(copy1.position.x, copy1.position.y, copy1.position.z),
+                                new THREE.Vector3(copy2.position.x, copy2.position.y, copy2.position.z)
+                            ];
+                            const beamGeometry = new THREE.BufferGeometry().setFromPoints(points);
+                            const beamMaterial = new THREE.LineBasicMaterial({
+                                color: 0x8b5cf6,
+                                transparent: true,
+                                opacity: 0.3 * coherence
+                            });
+                            const beam = new THREE.Line(beamGeometry, beamMaterial);
+                            qGroup.add(beam);
+                            quantumBeamsRef.current.push(beam);
+                        }
+                    }
+                } else {
+                    // Clean up quantum orbs when not in split
+                    quantumOrbMeshesRef.current.forEach((orbData) => {
+                        qGroup.remove(orbData.mesh);
+                        qGroup.remove(orbData.glow);
+                        qGroup.remove(orbData.ring);
+                    });
+                    quantumOrbMeshesRef.current.clear();
+
+                    quantumBeamsRef.current.forEach(beam => qGroup.remove(beam));
+                    quantumBeamsRef.current = [];
+
+                    // Show main orb again
+                    if (orbGroupRef.current) {
+                        orbGroupRef.current.visible = true;
                     }
                 }
             }

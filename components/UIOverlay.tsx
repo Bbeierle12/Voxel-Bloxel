@@ -15,6 +15,7 @@ import {
   ChatMessage,
   SystemLog,
   SidebarTab,
+  QuantumOrbState,
 } from '../types';
 import { generateStructure } from '../services/geminiService';
 import { Send, Loader2, Sparkles, Box, Hammer, X, Backpack, Cpu, MessageSquare, Settings, Code, Layers, Terminal } from 'lucide-react';
@@ -57,6 +58,9 @@ interface UIOverlayProps {
   onLoadSkill?: (skill: Skill) => void;
   onDeleteSkill?: (skillId: string) => void;
   isAgentProcessing?: boolean;
+  // Quantum
+  quantumState?: QuantumOrbState;
+  onCancelQuantum?: () => void;
   // Chat
   chatHistory?: ChatMessage[];
   onChatMessage?: (message: string) => void;
@@ -107,6 +111,8 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
   onLoadSkill,
   onDeleteSkill,
   isAgentProcessing = false,
+  quantumState,
+  onCancelQuantum,
   chatHistory = [],
   onChatMessage,
   logs = [],
@@ -349,6 +355,8 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
             onLoadSkill={onLoadSkill || (() => {})}
             onDeleteSkill={onDeleteSkill || (() => {})}
             isProcessing={isAgentProcessing}
+            quantumState={quantumState}
+            onCancelQuantum={onCancelQuantum}
           />
         ) : (
           <div className="flex items-center justify-center h-full text-gray-500">

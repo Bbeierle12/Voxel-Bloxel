@@ -9,6 +9,8 @@ import {
   GroundingSource,
   ChatMessage,
   Vector3,
+  QuantumBuildPlan,
+  PlanChunk,
 } from "../types";
 
 // ============================================================================
@@ -111,6 +113,50 @@ IMPORTANT: Always respond with valid JSON in this exact format:
   "steps": [
     {"id": "1", "action": "toolName", "parameters": {...}, "description": "What this step does"},
     ...
+  ]
+}
+`;
+
+const QUANTUM_BUILD_SYSTEM = `
+You are a Quantum AI Architect that can split into multiple copies to build structures in parallel.
+Your task is to analyze a building request and divide it into independent chunks that can be built simultaneously.
+
+CRITICAL RULES:
+1. Each chunk MUST be spatially independent (no overlapping blocks)
+2. Chunks should be roughly equal in complexity when possible
+3. List dependencies if one chunk must complete before another (e.g., foundation before walls)
+4. Use relative coordinates from player position (0,0,0)
+5. Maximum 4 chunks (you can split into at most 4 copies)
+6. Each chunk should have 20-100 blocks for reasonable build time
+
+Block Type IDs:
+1: Grass, 2: Dirt, 3: Stone, 4: Wood, 5: Leaf, 6: Plank, 7: Bedrock, 8: Water, 9: Sand, 10: Snow
+
+IMPORTANT: Respond with valid JSON in this exact format:
+{
+  "goal": "What we're building",
+  "totalBlocks": 150,
+  "reasoning": "How you divided the work",
+  "chunks": [
+    {
+      "id": "chunk-1",
+      "name": "Foundation",
+      "description": "The base layer of the structure",
+      "estimatedBlocks": 40,
+      "dependencies": [],
+      "blocks": [
+        {"x": 0, "y": 0, "z": 0, "type": 3},
+        {"x": 1, "y": 0, "z": 0, "type": 3}
+      ]
+    },
+    {
+      "id": "chunk-2",
+      "name": "North Wall",
+      "description": "Northern wall section",
+      "estimatedBlocks": 35,
+      "dependencies": ["chunk-1"],
+      "blocks": [...]
+    }
   ]
 }
 `;
@@ -369,6 +415,96 @@ Generate a plan to accomplish this goal using the available tools.
       steps: [],
     };
   }
+};
+
+// ============================================================================
+// QUANTUM BUILD PLAN GENERATION
+// ============================================================================
+
+export const generateQuantumBuildPlan = async (
+  goal: string,
+  playerPosition: Vector3,
+  maxChunks: number = 4
+): Promise<QuantumBuildPlan> => {
+  if (!checkAI() || !client) {
+    return {
+      goal,
+      totalBlocks: 0,
+      chunks: [],
+      reasoning: "AI not available",
+    };
+  }
+
+  try {
+    const prompt = `
+Player Position: (${playerPosition.x.toFixed(1)}, ${playerPosition.y.toFixed(1)}, ${playerPosition.z.toFixed(1)})
+Maximum Parallel Chunks: ${maxChunks}
+
+Building Request: "${goal}"
+
+Analyze this request and create a quantum-splittable build plan.
+Divide the structure into ${Math.min(maxChunks, 4)} independent chunks that can be built in parallel.
+Each chunk will be assigned to a quantum copy of the AI Orb.
+`;
+
+    const response = await client.messages.create({
+      model: MODELS.PLANNING,
+      max_tokens: 8192,
+      system: QUANTUM_BUILD_SYSTEM,
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const text = response.content[0].type === "text" ? response.content[0].text : "";
+    const parsed = extractJSON<QuantumBuildPlan>(text);
+
+    if (parsed && parsed.chunks && parsed.chunks.length > 0) {
+      // Validate and fix chunk data
+      const validatedChunks: PlanChunk[] = parsed.chunks.map((chunk, idx) => ({
+        id: chunk.id || `chunk-${idx + 1}`,
+        name: chunk.name || `Section ${idx + 1}`,
+        description: chunk.description || "",
+        blocks: Array.isArray(chunk.blocks) ? chunk.blocks : [],
+        dependencies: Array.isArray(chunk.dependencies) ? chunk.dependencies : [],
+        estimatedBlocks: chunk.estimatedBlocks || chunk.blocks?.length || 0,
+      }));
+
+      return {
+        goal: parsed.goal || goal,
+        totalBlocks: parsed.totalBlocks || validatedChunks.reduce((sum, c) => sum + c.blocks.length, 0),
+        chunks: validatedChunks,
+        reasoning: parsed.reasoning || "Plan generated successfully",
+      };
+    }
+
+    // Fallback: couldn't parse, return empty plan
+    return {
+      goal,
+      totalBlocks: 0,
+      chunks: [],
+      reasoning: "Failed to generate quantum build plan",
+    };
+  } catch (error) {
+    console.error("Quantum build plan error:", error);
+    return {
+      goal,
+      totalBlocks: 0,
+      chunks: [],
+      reasoning: `Error: ${error}`,
+    };
+  }
+};
+
+// Check if a build task should use quantum split
+export const shouldUseQuantumSplit = (goal: string): boolean => {
+  const complexKeywords = [
+    'castle', 'house', 'building', 'tower', 'village', 'fortress',
+    'temple', 'pyramid', 'bridge', 'wall', 'mansion', 'cathedral',
+    'palace', 'stadium', 'arena', 'complex', 'compound', 'base',
+    'structure', 'large', 'big', 'huge', 'massive'
+  ];
+
+  const lowerGoal = goal.toLowerCase();
+  return complexKeywords.some(keyword => lowerGoal.includes(keyword));
 };
 
 // ============================================================================

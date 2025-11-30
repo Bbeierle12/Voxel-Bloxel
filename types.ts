@@ -494,3 +494,105 @@ export interface UIState {
   consoleFilter: SystemLog['level'] | 'all';
   isPointerLocked: boolean;
 }
+
+// ============================================================================
+// QUANTUM ORB SYSTEM
+// ============================================================================
+
+export enum QuantumPhase {
+  COHERENT = 'coherent',       // Single orb, normal operation
+  SPLITTING = 'splitting',     // Animation: splitting into copies
+  SUPERPOSITION = 'superposition', // Multiple copies working
+  COLLAPSING = 'collapsing',   // Animation: merging back
+  DECOHERENT = 'decoherent',   // Emergency collapse (coherence lost)
+}
+
+export interface BlockPlacement {
+  x: number;
+  y: number;
+  z: number;
+  type: number;
+}
+
+export interface PlanChunk {
+  id: string;
+  name: string;
+  description: string;
+  blocks: BlockPlacement[];
+  dependencies: string[]; // IDs of chunks that must complete first
+  estimatedBlocks: number;
+}
+
+export interface QuantumBuildPlan {
+  goal: string;
+  totalBlocks: number;
+  chunks: PlanChunk[];
+  reasoning: string;
+}
+
+export type OrbCopyStatus = 'idle' | 'working' | 'complete' | 'blocked' | 'error';
+
+export interface OrbCopy {
+  id: string;
+  index: number;
+  position: Vector3;
+  targetPosition: Vector3;
+  assignedChunk: PlanChunk;
+  progress: number; // 0-100
+  status: OrbCopyStatus;
+  color: string;
+  blocksPlaced: number;
+  currentBlockIndex: number;
+}
+
+export interface QuantumOrbState {
+  phase: QuantumPhase;
+  isQuantumSplit: boolean;
+  copies: OrbCopy[];
+  masterPlan: QuantumBuildPlan | null;
+  coherenceLevel: number; // 0-1, decreases over time
+  coherenceDecayRate: number; // How fast coherence decays
+  splitStartTime: number | null;
+  collapseStartTime: number | null;
+  totalBlocksPlaced: number;
+  originalOrbPosition: Vector3;
+}
+
+export const createDefaultQuantumState = (): QuantumOrbState => ({
+  phase: QuantumPhase.COHERENT,
+  isQuantumSplit: false,
+  copies: [],
+  masterPlan: null,
+  coherenceLevel: 1.0,
+  coherenceDecayRate: 0.005, // Lose 0.5% coherence per second
+  splitStartTime: null,
+  collapseStartTime: null,
+  totalBlocksPlaced: 0,
+  originalOrbPosition: { x: 0, y: 5, z: 0 },
+});
+
+// Utility to generate orb copy colors (purple variations)
+export const generateOrbCopyColor = (index: number, total: number): string => {
+  const baseHue = 270; // Purple
+  const hueOffset = (index / total) * 60 - 30; // Spread across ±30 degrees
+  const hue = baseHue + hueOffset;
+  return `hsl(${hue}, 70%, 60%)`;
+};
+
+// Calculate positions for split orbs in a circle
+export const calculateOrbCopyPositions = (
+  centerPosition: Vector3,
+  numCopies: number,
+  radius: number = 4
+): Vector3[] => {
+  const positions: Vector3[] = [];
+  for (let i = 0; i < numCopies; i++) {
+    const angle = (i / numCopies) * Math.PI * 2;
+    positions.push({
+      x: centerPosition.x + Math.cos(angle) * radius,
+      y: centerPosition.y,
+      z: centerPosition.z + Math.sin(angle) * radius,
+    });
+  }
+  return positions;
+};

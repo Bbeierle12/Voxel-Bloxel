@@ -27,8 +27,22 @@ import {
   createDefaultOrbState,
   createDefaultAgentWorkflow,
   createDefaultSystemState,
+  // Quantum types
+  QuantumOrbState,
+  QuantumPhase,
+  OrbCopy,
+  QuantumBuildPlan,
+  createDefaultQuantumState,
+  generateOrbCopyColor,
+  calculateOrbCopyPositions,
 } from './types';
-import { generateAgentPlan, chatWithTools, generateBehaviorScript } from './services/geminiService';
+import {
+  generateAgentPlan,
+  chatWithTools,
+  generateBehaviorScript,
+  generateQuantumBuildPlan,
+  shouldUseQuantumSplit,
+} from './services/geminiService';
 import { logInfo, logSystem, logAI, logError, logWarn } from './components/ConsolePanel';
 
 // ============================================================================
@@ -85,6 +99,9 @@ function App() {
 
   // Selected Entity for Inspector
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
+
+  // Quantum Orb State
+  const [quantumState, setQuantumState] = useState<QuantumOrbState>(createDefaultQuantumState());
 
   // Refs
   const engineRef = useRef<GameEngineRef>(null);
@@ -507,6 +524,293 @@ function App() {
   }, [addLog]);
 
   // ============================================================================
+  // QUANTUM ORB SYSTEM
+  // ============================================================================
+
+  // Initiate quantum split for complex building tasks
+  const initiateQuantumSplit = useCallback(
+    async (goal: string) => {
+      const playerPos = engineRef.current?.getPlayerPosition() || { x: 0, y: 0, z: 0 };
+
+      addLog(logAI('⚛️ Analyzing task for quantum parallelization...', 'quantum'));
+      setOrbState((prev) => ({ ...prev, mode: OrbMode.THINKING, currentTask: goal }));
+      setQuantumState((prev) => ({
+        ...prev,
+        phase: QuantumPhase.SPLITTING,
+        originalOrbPosition: orbState.position,
+      }));
+
+      try {
+        // Generate quantum build plan
+        const plan = await generateQuantumBuildPlan(goal, playerPos, 4);
+
+        if (!plan.chunks || plan.chunks.length === 0) {
+          addLog(logWarn('Task not suitable for quantum split, using standard execution', 'quantum'));
+          setQuantumState(createDefaultQuantumState());
+          return false;
+        }
+
+        addLog(logAI(`⚛️ Quantum split initiated: ${plan.chunks.length} parallel copies`, 'quantum'));
+        addLog(logSystem(`Plan: ${plan.reasoning}`, 'quantum'));
+
+        // Calculate positions for orb copies
+        const copyPositions = calculateOrbCopyPositions(orbState.position, plan.chunks.length, 5);
+
+        // Create orb copies
+        const copies: OrbCopy[] = plan.chunks.map((chunk, index) => ({
+          id: `orb-copy-${index}-${Date.now()}`,
+          index,
+          position: { ...orbState.position }, // Start at center
+          targetPosition: copyPositions[index],
+          assignedChunk: chunk,
+          progress: 0,
+          status: 'idle',
+          color: generateOrbCopyColor(index, plan.chunks.length),
+          blocksPlaced: 0,
+          currentBlockIndex: 0,
+        }));
+
+        setQuantumState({
+          phase: QuantumPhase.SUPERPOSITION,
+          isQuantumSplit: true,
+          copies,
+          masterPlan: plan,
+          coherenceLevel: 1.0,
+          coherenceDecayRate: 0.002, // Slower decay for building
+          splitStartTime: Date.now(),
+          collapseStartTime: null,
+          totalBlocksPlaced: 0,
+          originalOrbPosition: orbState.position,
+        });
+
+        // Start parallel execution
+        executeQuantumBuild(copies, plan);
+        return true;
+      } catch (error) {
+        addLog(logError(`Quantum split failed: ${error}`, 'quantum'));
+        setQuantumState(createDefaultQuantumState());
+        setOrbState((prev) => ({ ...prev, mode: OrbMode.IDLE }));
+        return false;
+      }
+    },
+    [orbState.position, addLog]
+  );
+
+  // Execute quantum parallel build
+  const executeQuantumBuild = useCallback(
+    async (copies: OrbCopy[], plan: QuantumBuildPlan) => {
+      setOrbState((prev) => ({ ...prev, mode: OrbMode.ACTING }));
+
+      // Function to check if chunk dependencies are satisfied
+      const areDependenciesMet = (chunk: typeof plan.chunks[0], completedChunks: Set<string>) => {
+        return chunk.dependencies.every((dep) => completedChunks.has(dep));
+      };
+
+      const completedChunks = new Set<string>();
+      const blockDelay = 30; // ms between blocks
+
+      // Execute all chunks in parallel
+      const chunkPromises = copies.map(async (copy) => {
+        const chunk = copy.assignedChunk;
+
+        // Update copy status to working
+        setQuantumState((prev) => ({
+          ...prev,
+          copies: prev.copies.map((c) =>
+            c.id === copy.id ? { ...c, status: 'working' as const } : c
+          ),
+        }));
+
+        // Wait for dependencies
+        while (!areDependenciesMet(chunk, completedChunks)) {
+          // Check coherence - abort if too low
+          const currentState = quantumState;
+          if (currentState.coherenceLevel < 0.1) {
+            return { copyId: copy.id, success: false, reason: 'decoherence' };
+          }
+
+          setQuantumState((prev) => ({
+            ...prev,
+            copies: prev.copies.map((c) =>
+              c.id === copy.id ? { ...c, status: 'blocked' as const } : c
+            ),
+          }));
+
+          await new Promise((r) => setTimeout(r, 100));
+        }
+
+        // Set back to working
+        setQuantumState((prev) => ({
+          ...prev,
+          copies: prev.copies.map((c) =>
+            c.id === copy.id ? { ...c, status: 'working' as const } : c
+          ),
+        }));
+
+        addLog(logAI(`⚛️ Copy ${copy.index + 1} building: ${chunk.name}`, 'quantum'));
+
+        // Place blocks for this chunk
+        const playerPos = engineRef.current?.getPlayerPosition() || { x: 0, y: 0, z: 0 };
+
+        for (let i = 0; i < chunk.blocks.length; i++) {
+          const block = chunk.blocks[i];
+
+          // Place block (relative to player position)
+          const absoluteBlock: BlockData = {
+            x: Math.round(playerPos.x + block.x),
+            y: Math.round(playerPos.y + block.y),
+            z: Math.round(playerPos.z + block.z),
+            type: block.type,
+          };
+
+          if (engineRef.current) {
+            engineRef.current.placeBlocks([absoluteBlock]);
+          }
+
+          // Update copy progress and position
+          const progress = ((i + 1) / chunk.blocks.length) * 100;
+          setQuantumState((prev) => ({
+            ...prev,
+            copies: prev.copies.map((c) =>
+              c.id === copy.id
+                ? {
+                    ...c,
+                    progress,
+                    blocksPlaced: i + 1,
+                    currentBlockIndex: i,
+                    position: {
+                      x: absoluteBlock.x,
+                      y: absoluteBlock.y + 2,
+                      z: absoluteBlock.z,
+                    },
+                  }
+                : c
+            ),
+            totalBlocksPlaced: prev.totalBlocksPlaced + 1,
+          }));
+
+          await new Promise((r) => setTimeout(r, blockDelay));
+        }
+
+        // Mark chunk as complete
+        completedChunks.add(chunk.id);
+
+        setQuantumState((prev) => ({
+          ...prev,
+          copies: prev.copies.map((c) =>
+            c.id === copy.id ? { ...c, status: 'complete' as const, progress: 100 } : c
+          ),
+        }));
+
+        addLog(logInfo(`✓ Copy ${copy.index + 1} completed: ${chunk.name} (${chunk.blocks.length} blocks)`, 'quantum'));
+        return { copyId: copy.id, success: true };
+      });
+
+      // Wait for all chunks to complete
+      await Promise.all(chunkPromises);
+
+      // Collapse quantum state
+      collapseQuantumState();
+    },
+    [quantumState.coherenceLevel, addLog]
+  );
+
+  // Collapse quantum state back to single orb
+  const collapseQuantumState = useCallback(() => {
+    addLog(logAI('⚛️ All copies complete. Collapsing quantum state...', 'quantum'));
+
+    setQuantumState((prev) => ({
+      ...prev,
+      phase: QuantumPhase.COLLAPSING,
+      collapseStartTime: Date.now(),
+    }));
+
+    // Animate collapse (copies fly back to center)
+    setTimeout(() => {
+      const totalBlocks = quantumState.totalBlocksPlaced;
+      addLog(logSystem(`⚛️ Quantum coherence restored. Total blocks placed: ${totalBlocks}`, 'quantum'));
+
+      setQuantumState(createDefaultQuantumState());
+      setOrbState((prev) => ({
+        ...prev,
+        mode: OrbMode.IDLE,
+        currentTask: undefined,
+      }));
+    }, 1500); // Collapse animation duration
+  }, [quantumState.totalBlocksPlaced, addLog]);
+
+  // Force collapse due to decoherence
+  const forceQuantumCollapse = useCallback(() => {
+    addLog(logWarn('⚠️ Quantum coherence lost! Emergency collapse...', 'quantum'));
+
+    setQuantumState((prev) => ({
+      ...prev,
+      phase: QuantumPhase.DECOHERENT,
+    }));
+
+    setTimeout(() => {
+      setQuantumState(createDefaultQuantumState());
+      setOrbState((prev) => ({
+        ...prev,
+        mode: OrbMode.IDLE,
+        currentTask: undefined,
+      }));
+    }, 1000);
+  }, [addLog]);
+
+  // Cancel quantum operation
+  const cancelQuantumOperation = useCallback(() => {
+    addLog(logWarn('⚛️ Quantum operation cancelled', 'quantum'));
+    setQuantumState(createDefaultQuantumState());
+    setOrbState((prev) => ({
+      ...prev,
+      mode: OrbMode.IDLE,
+      currentTask: undefined,
+    }));
+  }, [addLog]);
+
+  // Update coherence decay in game loop
+  useEffect(() => {
+    if (!quantumState.isQuantumSplit) return;
+
+    const decayInterval = setInterval(() => {
+      setQuantumState((prev) => {
+        const newCoherence = Math.max(0, prev.coherenceLevel - prev.coherenceDecayRate);
+
+        if (newCoherence <= 0.1 && prev.phase === QuantumPhase.SUPERPOSITION) {
+          // Trigger emergency collapse
+          forceQuantumCollapse();
+          return prev;
+        }
+
+        return {
+          ...prev,
+          coherenceLevel: newCoherence,
+        };
+      });
+    }, 1000);
+
+    return () => clearInterval(decayInterval);
+  }, [quantumState.isQuantumSplit, forceQuantumCollapse]);
+
+  // Modified handleStartPlan to check for quantum split opportunity
+  const handleStartPlanWithQuantum = useCallback(
+    async (goal: string) => {
+      // Check if this task should use quantum split
+      if (shouldUseQuantumSplit(goal)) {
+        addLog(logAI('⚛️ Complex task detected - initiating quantum split...', 'quantum'));
+        const success = await initiateQuantumSplit(goal);
+        if (success) return;
+        // Fall through to standard execution if quantum split fails
+      }
+
+      // Standard execution
+      handleStartPlan(goal);
+    },
+    [initiateQuantumSplit, handleStartPlan, addLog]
+  );
+
+  // ============================================================================
   // ENTITY MANAGEMENT
   // ============================================================================
 
@@ -668,6 +972,7 @@ function App() {
         onBlockPlace={handleBlockPlace}
         orbState={orbState}
         entities={worldState.entities}
+        quantumState={quantumState}
       />
 
       {/* UI Overlay */}
@@ -696,7 +1001,7 @@ function App() {
         isGeneratingTexture={isGeneratingTexture}
         // Agent
         agentWorkflow={agentWorkflow}
-        onStartPlan={handleStartPlan}
+        onStartPlan={handleStartPlanWithQuantum}
         onExecuteStep={handleExecuteStep}
         onPauseExecution={handlePauseExecution}
         onResumeExecution={handleResumeExecution}
@@ -705,6 +1010,9 @@ function App() {
         onLoadSkill={handleLoadSkill}
         onDeleteSkill={handleDeleteSkill}
         isAgentProcessing={isAgentProcessing}
+        // Quantum
+        quantumState={quantumState}
+        onCancelQuantum={cancelQuantumOperation}
         // Chat
         chatHistory={chatHistory}
         onChatMessage={handleChatMessage}

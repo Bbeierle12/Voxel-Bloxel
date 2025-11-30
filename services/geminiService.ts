@@ -12,6 +12,9 @@ export {
   generateTexture,
   chatWithTools,
   isAIAvailable,
+  // Quantum build functions
+  generateQuantumBuildPlan,
+  shouldUseQuantumSplit,
 } from "./claudeService";
 
 export type {
