@@ -89,7 +89,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         direction: new THREE.Vector3(),
         onGround: false,
         speed: 8,
-        jumpForce: 12
+        jumpForce: 13
     });
     
     // Game State stored in refs to avoid re-renders
@@ -383,10 +383,30 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                     const ny = Math.floor(p.y + n.y * 0.5);
                     const nz = Math.floor(p.z + n.z * 0.5);
 
+                    // AABB check against player to prevent self-block
                     const pc = cameraRef.current.position;
-                    if (Math.abs(nx - pc.x) < 0.8 && Math.abs(ny - (pc.y - 1)) < 1.8 && Math.abs(nz - pc.z) < 0.8) {
-                        return;
-                    }
+                    // Player bounds approx
+                    const minX = pc.x - 0.4;
+                    const maxX = pc.x + 0.4;
+                    const minZ = pc.z - 0.4;
+                    const maxZ = pc.z + 0.4;
+                    const minY = pc.y - 1.6; // Feet
+                    const maxY = pc.y + 0.2; // Head
+
+                    // Block bounds
+                    const bx = nx;
+                    const by = ny;
+                    const bz = nz;
+
+                    // Simple AABB vs AABB overlap
+                    const overlap = (
+                        minX < bx + 0.5 && maxX > bx - 0.5 &&
+                        minY < by + 0.5 && maxY > by - 0.5 &&
+                        minZ < bz + 0.5 && maxZ > bz - 0.5
+                    );
+
+                    if (overlap) return;
+
                     // Attempt to add block (checks inventory inside addBlock)
                     addBlock(nx, ny, nz, selectedBlockRef.current, false);
                 }
@@ -405,6 +425,32 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         document.addEventListener('mousemove', handleMouseMove);
         document.addEventListener('mousedown', handleMouseDown);
         document.addEventListener('pointerlockchange', handlePointerLockChange);
+
+        // --- Physics Helper Constants ---
+        const PLAYER_RADIUS = 0.35;
+        const PLAYER_HEIGHT = 1.8;
+        const CAM_OFFSET = 1.6; // Eyes are 1.6m above feet
+
+        // Robust AABB check for capsule-like collision
+        const checkIntersection = (pos: THREE.Vector3) => {
+            const minX = Math.floor(pos.x - PLAYER_RADIUS);
+            const maxX = Math.floor(pos.x + PLAYER_RADIUS);
+            const minZ = Math.floor(pos.z - PLAYER_RADIUS);
+            const maxZ = Math.floor(pos.z + PLAYER_RADIUS);
+            
+            // Check from feet up to head
+            const minY = Math.floor(pos.y - CAM_OFFSET + 0.05); // +epsilon to avoid floor triggers when standing
+            const maxY = Math.floor(pos.y - CAM_OFFSET + PLAYER_HEIGHT - 0.05); // -epsilon for head clearance
+
+            for (let x = minX; x <= maxX; x++) {
+                for (let z = minZ; z <= maxZ; z++) {
+                    for (let y = minY; y <= maxY; y++) {
+                        if (chunksRef.current[getKey(x, y, z)]) return true;
+                    }
+                }
+            }
+            return false;
+        };
 
         // --- Game Loop using setAnimationLoop ---
         const clock = new THREE.Clock();
@@ -426,17 +472,11 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             const totalTime = clock.getElapsedTime();
             const dayProgress = (totalTime % dayDuration) / dayDuration; // 0 to 1
             
-            // Calculate Sun Position (Simple circular motion overhead)
-            // 0.0 = Sunrise (Left Horizon)
-            // 0.25 = Noon (Top)
-            // 0.5 = Sunset (Right Horizon)
-            // 0.75 = Midnight (Bottom)
-            
-            const sunAngle = (dayProgress * Math.PI * 2) - (Math.PI / 2); // Start at -PI/2 (Left)
+            const sunAngle = (dayProgress * Math.PI * 2) - (Math.PI / 2); 
             const sunR = 150;
             sunLight.position.x = Math.cos(sunAngle) * sunR;
             sunLight.position.y = Math.sin(sunAngle) * sunR;
-            sunLight.position.z = Math.cos(sunAngle * 0.5) * 50; // Add slight Z wobble
+            sunLight.position.z = Math.cos(sunAngle * 0.5) * 50; 
 
             // Color Interpolation
             let targetBg = colorNight;
@@ -479,7 +519,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 sceneRef.current.fog.color.copy(targetBg);
             }
             sunLight.intensity = sunIntensity;
-            ambientLight.intensity = 0.1 + (sunIntensity * 0.5); // Ambient varies with sun
+            ambientLight.intensity = 0.1 + (sunIntensity * 0.5); 
             starMat.opacity = starOpacity;
             
             // Move Clouds
@@ -487,8 +527,6 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 c.position.x += delta * 2;
                 if(c.position.x > 300) c.position.x = -300;
             });
-            
-            // Rotate Stars
             skyGroup.rotation.y += delta * 0.01;
 
             // --- Physics & Player ---
@@ -496,15 +534,20 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 const player = playerRef.current;
                 const cam = cameraRef.current;
                 
-                player.velocity.y -= 30 * delta; 
+                // Gravity
+                player.velocity.y -= 32 * delta; 
 
+                // Input
                 const inputZ = Number(!!keysRef.current['KeyW']) - Number(!!keysRef.current['KeyS']);
                 const inputX = Number(!!keysRef.current['KeyD']) - Number(!!keysRef.current['KeyA']);
                 
+                // Jump
                 if (keysRef.current['Space'] && player.onGround) {
                     player.velocity.y = player.jumpForce;
+                    player.onGround = false;
                 }
 
+                // Vectors
                 const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
                 forward.y = 0; forward.normalize();
                 const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
@@ -514,34 +557,61 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 moveVec.addScaledVector(forward, inputZ * player.speed * delta);
                 moveVec.addScaledVector(right, inputX * player.speed * delta);
 
-                const checkCollision = (x: number, y: number, z: number) => {
-                    return !!chunksRef.current[getKey(Math.floor(x), Math.floor(y), Math.floor(z))];
-                };
-
-                if (!checkCollision(cam.position.x + moveVec.x, cam.position.y - 1, cam.position.z) &&
-                    !checkCollision(cam.position.x + moveVec.x, cam.position.y, cam.position.z)) {
+                // --- X Movement (Wall Slide + Slope) ---
+                let tentativePos = cam.position.clone();
+                tentativePos.x += moveVec.x;
+                if (checkIntersection(tentativePos)) {
+                    // Try stepping up (Slope)
+                    tentativePos.y += 1.1; 
+                    if (!checkIntersection(tentativePos)) {
+                        cam.position.x += moveVec.x;
+                        cam.position.y += 1.1;
+                    } 
+                    // else: Wall hit, do nothing (slide)
+                } else {
                     cam.position.x += moveVec.x;
                 }
-                if (!checkCollision(cam.position.x, cam.position.y - 1, cam.position.z + moveVec.z) &&
-                    !checkCollision(cam.position.x, cam.position.y, cam.position.z + moveVec.z)) {
+
+                // --- Z Movement (Wall Slide + Slope) ---
+                tentativePos = cam.position.clone();
+                tentativePos.z += moveVec.z;
+                if (checkIntersection(tentativePos)) {
+                    // Try stepping up
+                    tentativePos.y += 1.1;
+                    if (!checkIntersection(tentativePos)) {
+                        cam.position.z += moveVec.z;
+                        cam.position.y += 1.1;
+                    }
+                } else {
                     cam.position.z += moveVec.z;
                 }
 
-                player.onGround = false;
+                // --- Y Movement (Gravity / Ground) ---
                 const dy = player.velocity.y * delta;
-                
-                if (checkCollision(cam.position.x, cam.position.y - 1.5 + dy, cam.position.z)) {
-                    player.velocity.y = 0;
-                    player.onGround = true;
-                    cam.position.y = Math.floor(cam.position.y - 1.5 + dy) + 2.5; 
+                tentativePos = cam.position.clone();
+                tentativePos.y += dy;
+
+                if (checkIntersection(tentativePos)) {
+                    if (player.velocity.y < 0) {
+                        // Landed
+                        player.velocity.y = 0;
+                        player.onGround = true;
+                        // Snap to block top
+                        // We hit a block at floor(feetPos). Top is floor+1.
+                        // Feet should be at floor(y) + 1. 
+                        // Cam should be feet + offset.
+                        const hitBlockY = Math.floor(cam.position.y - CAM_OFFSET - 0.1); 
+                        cam.position.y = hitBlockY + 1 + CAM_OFFSET;
+                    } else {
+                        // Head hit ceiling
+                        player.velocity.y = 0;
+                    }
                 } else {
                     cam.position.y += dy;
-                }
-                
-                if(player.velocity.y > 0 && checkCollision(cam.position.x, cam.position.y + 0.5, cam.position.z)) {
-                   player.velocity.y = 0;
+                    player.onGround = false;
                 }
 
+                // Kill Floor
                 if (cam.position.y < -30) {
                     cam.position.set(0, 20, 0);
                     player.velocity.y = 0;
