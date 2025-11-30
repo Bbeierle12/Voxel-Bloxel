@@ -366,7 +366,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         }
 
         // --- Terrain Gen (Async Chunked Loading) ---
-        const WORLD_SIZE = 300; // Large world
+        const WORLD_SIZE = 120; // Reduced for faster loading
         const offset = WORLD_SIZE / 2;
         const CHUNK_SIZE = 16; // Process in 16x16 chunks
         console.log('Starting terrain generation...');
@@ -402,8 +402,8 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                     let height = 0;
                     let isFlat = false;
 
-                    // Central Flat Zone: -50 to 50
-                    if (x > -50 && x < 50 && z > -50 && z < 50) {
+                    // Central Flat Zone: -20 to 20
+                    if (x > -20 && x < 20 && z > -20 && z < 20) {
                          height = 0;
                          isFlat = true;
                     } else {
