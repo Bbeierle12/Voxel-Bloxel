@@ -90,6 +90,8 @@ function App() {
   const engineRef = useRef<GameEngineRef>(null);
   const gameLoopRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
+  const executeEntityScriptRef = useRef<(entity: Entity, deltaTime: number, elapsedTime: number) => Entity>(() => ({} as Entity));
+  const simulatePhysicsRef = useRef<(entity: Entity, deltaTime: number) => Entity>(() => ({} as Entity));
 
   // ============================================================================
   // LOGGING HELPER
@@ -189,6 +191,15 @@ function App() {
   // GAME LOOP
   // ============================================================================
 
+  // Keep refs updated with latest callbacks
+  useEffect(() => {
+    executeEntityScriptRef.current = executeEntityScript;
+  }, [executeEntityScript]);
+
+  useEffect(() => {
+    simulatePhysicsRef.current = simulatePhysics;
+  }, [simulatePhysics]);
+
   useEffect(() => {
     let elapsedTime = 0;
 
@@ -202,10 +213,10 @@ function App() {
         const timeScale = prev.physics.timeScale;
         const newTimeOfDay = (prev.timeOfDay + (deltaTime * timeScale) / prev.dayDuration) % 1;
 
-        // Update entities with physics and scripts
+        // Update entities with physics and scripts (using refs to avoid dependency issues)
         const updatedEntities = prev.entities.map((entity) => {
-          let updated = executeEntityScript(entity, deltaTime, elapsedTime);
-          updated = simulatePhysics(updated, deltaTime);
+          let updated = executeEntityScriptRef.current(entity, deltaTime, elapsedTime);
+          updated = simulatePhysicsRef.current(updated, deltaTime);
           return updated;
         });
 
@@ -243,7 +254,8 @@ function App() {
         cancelAnimationFrame(gameLoopRef.current);
       }
     };
-  }, [executeEntityScript, simulatePhysics, addLog]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ============================================================================
   // AI TOOL EXECUTION

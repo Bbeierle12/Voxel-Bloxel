@@ -12,10 +12,7 @@ if (!rootElement) {
 console.log('Root element found, mounting React app...');
 
 const root = ReactDOM.createRoot(rootElement);
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+// Removed StrictMode to prevent double-mounting of Three.js scene
+root.render(<App />);
 
 console.log('React app mounted');

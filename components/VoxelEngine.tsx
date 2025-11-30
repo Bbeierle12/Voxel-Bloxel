@@ -223,6 +223,14 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             console.log('Container ref is null!');
             return;
         }
+        
+        // Prevent double initialization
+        if (rendererRef.current) {
+            console.log('Renderer already exists, skipping initialization');
+            return;
+        }
+
+        let isMounted = true;
 
         try {
             console.log('Initializing Three.js scene...');
@@ -586,7 +594,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         const dayDuration = 120; // Seconds for a full day cycle
 
         const animate = (time: number) => {
-            if (!sceneRef.current || !cameraRef.current || !rendererRef.current) return;
+            if (!isMounted || !sceneRef.current || !cameraRef.current || !rendererRef.current) return;
 
             const delta = Math.min(clock.getDelta(), 0.1);
 
@@ -831,6 +839,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         let frameId = requestAnimationFrame(animate);
 
         return () => {
+            isMounted = false;
             cancelAnimationFrame(frameId);
             window.removeEventListener('resize', handleResize);
             document.removeEventListener('keydown', handleKeyDown);
