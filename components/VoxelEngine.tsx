@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import * as THREE from 'three';
-// @ts-ignore
-import { WebGPURenderer } from 'three/webgpu';
-import { GameStats, BlockData, GameEngineRef, ItemType } from '../types';
+import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, Entity } from '../types';
 
 // Texture Generation Utility
 function createTexture(color: string, noiseIntensity = 20) {
@@ -77,9 +75,11 @@ interface VoxelEngineProps {
     checkCanPlace: (type: ItemType) => boolean;
     onBlockPlace: (type: ItemType) => void;
     selectedBlockIndex: number; // Maps to BLOCK_TYPES index
+    orbState?: OrbState;
+    entities?: Entity[];
 }
 
-const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex }, ref) => {
+const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex, orbState, entities = [] }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -91,6 +91,16 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         speed: 8,
         jumpForce: 13
     });
+    
+    // AI Orb refs
+    const orbGroupRef = useRef<THREE.Group | null>(null);
+    const orbMeshRef = useRef<THREE.Mesh | null>(null);
+    const orbGlowRef = useRef<THREE.PointLight | null>(null);
+    const orbScanConeRef = useRef<THREE.Mesh | null>(null);
+    const orbStateRef = useRef<OrbState | undefined>(orbState);
+    
+    // Entity meshes tracking
+    const entityMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
     
     // Game State stored in refs to avoid re-renders
     const chunksRef = useRef<Record<string, THREE.Mesh>>({});
@@ -110,7 +120,8 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         checkCanPlaceRef.current = checkCanPlace;
         onBlockPlaceRef.current = onBlockPlace;
         onBlockBreakRef.current = onBlockBreak;
-    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak]);
+        orbStateRef.current = orbState;
+    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak, orbState]);
 
     const getKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
@@ -188,36 +199,58 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 z: Math.floor(cameraRef.current.position.z)
             };
         },
+        getOrbPosition: () => {
+            if (!orbGroupRef.current) return { x: 0, y: 5, z: -3 };
+            return {
+                x: orbGroupRef.current.position.x,
+                y: orbGroupRef.current.position.y,
+                z: orbGroupRef.current.position.z
+            };
+        },
+        moveOrb: (x: number, y: number, z: number) => {
+            if (orbGroupRef.current) {
+                orbGroupRef.current.position.set(x, y, z);
+            }
+        },
         requestLock: () => {
             requestLock();
         }
     }));
 
     useEffect(() => {
-        if (!containerRef.current) return;
+        console.log('VoxelEngine useEffect starting...');
+        if (!containerRef.current) {
+            console.log('Container ref is null!');
+            return;
+        }
 
-        // --- Init Three.js with WebGPURenderer ---
-        const scene = new THREE.Scene();
-        // Initial Sky Color (Day)
-        scene.background = new THREE.Color(0x87CEEB);
-        scene.fog = new THREE.Fog(0x87CEEB, 20, 200);
-        sceneRef.current = scene;
+        try {
+            console.log('Initializing Three.js scene...');
+            // --- Init Three.js ---
+            const scene = new THREE.Scene();
+            // Initial Sky Color (Day)
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 50, 150);
+            sceneRef.current = scene;
 
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.set(0, 10, 0);
-        cameraRef.current = camera;
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 10, 0);
+            cameraRef.current = camera;
 
-        // Use WebGPURenderer
-        const renderer = new WebGPURenderer({ antialias: false, forceWebGL: false });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        containerRef.current.appendChild(renderer.domElement);
-        rendererRef.current = renderer;
+            console.log('Creating WebGL renderer...');
+            // Use WebGLRenderer (more compatible than WebGPU)
+            const renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            containerRef.current.appendChild(renderer.domElement);
+            rendererRef.current = renderer;
+            console.log('WebGL renderer created successfully');
 
-        // Lights
-        const ambientLight = new THREE.AmbientLight(0xaaaaaa, 0.6);
-        scene.add(ambientLight);
+            // Lights
+            const ambientLight = new THREE.AmbientLight(0xaaaaaa, 0.6);
+            scene.add(ambientLight);
 
         const sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
         sunLight.position.set(50, 100, 50);
@@ -232,6 +265,61 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         sunLight.shadow.camera.top = d;
         sunLight.shadow.camera.bottom = -d;
         scene.add(sunLight);
+
+        // --- AI Orb Creation ---
+        const orbGroup = new THREE.Group();
+        orbGroup.position.set(0, 5, -3); // Start in front of player spawn
+        orbGroupRef.current = orbGroup;
+        scene.add(orbGroup);
+
+        // Main orb sphere with purple emissive material
+        const orbGeometry = new THREE.IcosahedronGeometry(0.4, 3);
+        const orbMaterial = new THREE.MeshStandardMaterial({
+            color: 0x8b5cf6,
+            emissive: 0x8b5cf6,
+            emissiveIntensity: 0.5,
+            metalness: 0.8,
+            roughness: 0.2,
+            transparent: true,
+            opacity: 0.9
+        });
+        const orbMesh = new THREE.Mesh(orbGeometry, orbMaterial);
+        orbMesh.castShadow = true;
+        orbGroup.add(orbMesh);
+        orbMeshRef.current = orbMesh;
+
+        // Outer glow ring
+        const ringGeometry = new THREE.TorusGeometry(0.6, 0.05, 16, 32);
+        const ringMaterial = new THREE.MeshBasicMaterial({
+            color: 0xa855f7,
+            transparent: true,
+            opacity: 0.6
+        });
+        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        ring.rotation.x = Math.PI / 2;
+        orbGroup.add(ring);
+
+        // Point light for glow effect
+        const orbGlow = new THREE.PointLight(0x8b5cf6, 2, 10);
+        orbGlow.position.set(0, 0, 0);
+        orbGroup.add(orbGlow);
+        orbGlowRef.current = orbGlow;
+
+        // Scanning cone (visible when in 'scanning' mode)
+        const coneGeometry = new THREE.ConeGeometry(2, 8, 16, 1, true);
+        const coneMaterial = new THREE.MeshBasicMaterial({
+            color: 0x8b5cf6,
+            transparent: true,
+            opacity: 0.15,
+            side: THREE.DoubleSide,
+            wireframe: false
+        });
+        const scanCone = new THREE.Mesh(coneGeometry, coneMaterial);
+        scanCone.rotation.x = Math.PI; // Point downward
+        scanCone.position.y = -4;
+        scanCone.visible = false;
+        orbGroup.add(scanCone);
+        orbScanConeRef.current = scanCone;
 
         // --- Sky System (Stars & Clouds) ---
         const skyGroup = new THREE.Group();
@@ -277,9 +365,11 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             clouds.push(cloud);
         }
 
-        // --- Terrain Gen ---
-        const WORLD_SIZE = 300; // Increased World Size
+        // --- Terrain Gen (Async Chunked Loading) ---
+        const WORLD_SIZE = 300; // Large world
         const offset = WORLD_SIZE / 2;
+        const CHUNK_SIZE = 16; // Process in 16x16 chunks
+        console.log('Starting terrain generation...');
 
         const createTree = (tx: number, ty: number, tz: number) => {
             // Trunk
@@ -300,42 +390,74 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             }
         };
 
-        for (let x = -offset; x < offset; x++) {
-            for (let z = -offset; z < offset; z++) {
-                let height = 0;
-                let isFlat = false;
+        // Generate terrain in chunks to prevent browser freeze
+        const generateChunk = (chunkX: number, chunkZ: number) => {
+            const startX = chunkX * CHUNK_SIZE - offset;
+            const startZ = chunkZ * CHUNK_SIZE - offset;
+            const endX = Math.min(startX + CHUNK_SIZE, offset);
+            const endZ = Math.min(startZ + CHUNK_SIZE, offset);
 
-                // Central Flat Zone: -50 to 50
-                if (x > -50 && x < 50 && z > -50 && z < 50) {
-                     height = 0;
-                     isFlat = true;
-                } else {
-                     const h1 = Math.sin(x * 0.1) * Math.cos(z * 0.1) * 3;
-                     const h2 = Math.sin(x * 0.3) * Math.sin(z * 0.3) * 1;
-                     height = Math.floor(h1 + h2);
-                }
+            for (let x = startX; x < endX; x++) {
+                for (let z = startZ; z < endZ; z++) {
+                    let height = 0;
+                    let isFlat = false;
 
-                // Bedrock/Base
-                addBlock(x, -5, z, 2, true); 
+                    // Central Flat Zone: -50 to 50
+                    if (x > -50 && x < 50 && z > -50 && z < 50) {
+                         height = 0;
+                         isFlat = true;
+                    } else {
+                         const h1 = Math.sin(x * 0.1) * Math.cos(z * 0.1) * 3;
+                         const h2 = Math.sin(x * 0.3) * Math.sin(z * 0.3) * 1;
+                         height = Math.floor(h1 + h2);
+                    }
 
-                for (let y = -4; y <= height; y++) {
-                    let typeIdx = 2; // Stone
-                    if (y === height) typeIdx = 0; // Grass
-                    else if (y > height - 3) typeIdx = 1; // Dirt
-                    addBlock(x, y, z, typeIdx, true);
-                }
+                    // Bedrock/Base
+                    addBlock(x, -5, z, 2, true); 
 
-                // Trees only outside flat zone
-                if (!isFlat) {
-                     if (x > -offset + 2 && x < offset - 2 && z > -offset + 2 && z < offset - 2) {
-                        // 1% chance for a tree
-                        if (Math.random() < 0.01 && height > 0) {
-                            createTree(x, height + 1, z);
-                        }
-                     }
+                    for (let y = -4; y <= height; y++) {
+                        let typeIdx = 2; // Stone
+                        if (y === height) typeIdx = 0; // Grass
+                        else if (y > height - 3) typeIdx = 1; // Dirt
+                        addBlock(x, y, z, typeIdx, true);
+                    }
+
+                    // Trees only outside flat zone
+                    if (!isFlat) {
+                         if (x > -offset + 2 && x < offset - 2 && z > -offset + 2 && z < offset - 2) {
+                            // 1% chance for a tree
+                            if (Math.random() < 0.01 && height > 0) {
+                                createTree(x, height + 1, z);
+                            }
+                         }
+                    }
                 }
             }
-        }
+        };
+
+        // Load chunks asynchronously
+        const chunksPerAxis = Math.ceil(WORLD_SIZE / CHUNK_SIZE);
+        let chunkIndex = 0;
+        const totalChunks = chunksPerAxis * chunksPerAxis;
+
+        const loadNextChunks = () => {
+            const chunksPerFrame = 4; // Load 4 chunks per frame for balance
+            for (let i = 0; i < chunksPerFrame && chunkIndex < totalChunks; i++) {
+                const chunkX = chunkIndex % chunksPerAxis;
+                const chunkZ = Math.floor(chunkIndex / chunksPerAxis);
+                generateChunk(chunkX, chunkZ);
+                chunkIndex++;
+            }
+
+            if (chunkIndex < totalChunks) {
+                setTimeout(loadNextChunks, 0); // Yield to browser
+            } else {
+                console.log('Terrain generation complete. Block count:', Object.keys(chunksRef.current).length);
+            }
+        };
+
+        // Start async loading
+        loadNextChunks();
 
         // --- Event Listeners ---
         const handleResize = () => {
@@ -529,6 +651,73 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             });
             skyGroup.rotation.y += delta * 0.01;
 
+            // --- AI Orb Animation ---
+            if (orbGroupRef.current && orbMeshRef.current && orbGlowRef.current) {
+                const orb = orbGroupRef.current;
+                const orbMesh = orbMeshRef.current;
+                const orbGlow = orbGlowRef.current;
+                const orbMat = orbMesh.material as THREE.MeshStandardMaterial;
+                const currentOrbState = orbStateRef.current;
+                
+                // Floating animation (always active)
+                const floatOffset = Math.sin(totalTime * 2) * 0.15;
+                orb.position.y = (currentOrbState?.position?.y || 5) + floatOffset;
+                
+                // Sync position from state
+                if (currentOrbState?.position) {
+                    orb.position.x = currentOrbState.position.x;
+                    orb.position.z = currentOrbState.position.z;
+                }
+                
+                // Gentle rotation
+                orbMesh.rotation.y += delta * 0.5;
+                orbMesh.rotation.x = Math.sin(totalTime) * 0.1;
+                
+                // State-based appearance
+                const mode = currentOrbState?.mode || 'idle';
+                
+                if (mode === 'idle') {
+                    // Calm purple glow
+                    orbMat.emissiveIntensity = 0.3 + Math.sin(totalTime * 2) * 0.1;
+                    orbGlow.intensity = 1.5 + Math.sin(totalTime * 2) * 0.5;
+                    orbGlow.color.setHex(0x8b5cf6);
+                    orbMat.emissive.setHex(0x8b5cf6);
+                    if (orbScanConeRef.current) orbScanConeRef.current.visible = false;
+                } else if (mode === 'thinking') {
+                    // Pulsing blue
+                    const pulse = Math.sin(totalTime * 6) * 0.5 + 0.5;
+                    orbMat.emissiveIntensity = 0.4 + pulse * 0.4;
+                    orbGlow.intensity = 2 + pulse * 2;
+                    orbGlow.color.setHex(0x3b82f6);
+                    orbMat.emissive.setHex(0x3b82f6);
+                    // Spin faster when thinking
+                    orbMesh.rotation.y += delta * 2;
+                    if (orbScanConeRef.current) orbScanConeRef.current.visible = false;
+                } else if (mode === 'acting') {
+                    // Bright green, active
+                    orbMat.emissiveIntensity = 0.8;
+                    orbGlow.intensity = 4;
+                    orbGlow.color.setHex(0x22c55e);
+                    orbMat.emissive.setHex(0x22c55e);
+                    // Fast spin
+                    orbMesh.rotation.y += delta * 5;
+                    if (orbScanConeRef.current) orbScanConeRef.current.visible = false;
+                } else if (mode === 'scanning') {
+                    // Purple with visible scan cone
+                    orbMat.emissiveIntensity = 0.6;
+                    orbGlow.intensity = 3;
+                    orbGlow.color.setHex(0xa855f7);
+                    orbMat.emissive.setHex(0xa855f7);
+                    if (orbScanConeRef.current) {
+                        orbScanConeRef.current.visible = true;
+                        orbScanConeRef.current.rotation.y += delta * 2;
+                        // Pulsing opacity
+                        (orbScanConeRef.current.material as THREE.MeshBasicMaterial).opacity = 
+                            0.1 + Math.sin(totalTime * 4) * 0.05;
+                    }
+                }
+            }
+
             // --- Physics & Player ---
             if (isLockedRef.current) {
                 const player = playerRef.current;
@@ -625,6 +814,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 onStatsUpdate({
                     fps: frameCount,
                     blockCount: objectsRef.current.length,
+                    entityCount: 0,
                     x: Math.floor(cameraRef.current.position.x),
                     y: Math.floor(cameraRef.current.position.y),
                     z: Math.floor(cameraRef.current.position.z)
@@ -632,12 +822,16 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 frameCount = 0;
                 lastTime = time;
             }
+            
+            frameId = requestAnimationFrame(animate);
         };
 
-        // WebGPURenderer uses setAnimationLoop instead of requestAnimationFrame
-        renderer.setAnimationLoop(animate);
+        // Start animation loop with requestAnimationFrame
+        console.log('Starting animation loop...');
+        let frameId = requestAnimationFrame(animate);
 
         return () => {
+            cancelAnimationFrame(frameId);
             window.removeEventListener('resize', handleResize);
             document.removeEventListener('keydown', handleKeyDown);
             document.removeEventListener('keyup', handleKeyUp);
@@ -646,14 +840,19 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             document.removeEventListener('pointerlockchange', handlePointerLockChange);
             
             if (rendererRef.current) {
-                rendererRef.current.setAnimationLoop(null);
                 rendererRef.current.dispose();
             }
             
             if (rendererRef.current && containerRef.current) {
-                containerRef.current.removeChild(rendererRef.current.domElement);
+                try {
+                    containerRef.current.removeChild(rendererRef.current.domElement);
+                } catch (e) {}
             }
         };
+        } catch (error) {
+            console.error('VoxelEngine initialization error:', error);
+            return () => {}; // Empty cleanup
+        }
     }, []); 
 
     return (
