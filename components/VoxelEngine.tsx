@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, Entity } from '../types';
+import { GameStats, BlockData, GameEngineRef, ItemType, OrbState, OrbMode, Entity, RaycastResult, Vector3, AutonomousOrbState } from '../types';
 import { getPhysicsSystem } from '../services/gpuPhysics';
 
 // Texture Generation Utility
@@ -46,7 +46,11 @@ const textures = {
     wood: createTexture('#654321'),
     leaf: createTexture('#2d5a27'),
     plank: createTexture('#C19A6B'),
-    bedrock: createTexture('#1a1a1a')
+    bedrock: createTexture('#1a1a1a'),
+    water: createTexture('#3498db', 5),
+    sand: createTexture('#f4d03f', 15),
+    snow: createTexture('#ecf0f1', 5),
+    sapling: createTexture('#3d8c40', 15)
 };
 
 // Use MeshStandardMaterial for better WebGPU support and PBR lighting
@@ -57,17 +61,26 @@ const materials = {
     wood: new THREE.MeshStandardMaterial({ map: textures.wood }),
     leaf: new THREE.MeshStandardMaterial({ map: textures.leaf, transparent: true, opacity: 0.9 }),
     plank: new THREE.MeshStandardMaterial({ map: textures.plank }),
-    bedrock: new THREE.MeshStandardMaterial({ map: textures.bedrock })
+    bedrock: new THREE.MeshStandardMaterial({ map: textures.bedrock }),
+    water: new THREE.MeshStandardMaterial({ map: textures.water, transparent: true, opacity: 0.7 }),
+    sand: new THREE.MeshStandardMaterial({ map: textures.sand }),
+    snow: new THREE.MeshStandardMaterial({ map: textures.snow }),
+    sapling: new THREE.MeshStandardMaterial({ map: textures.sapling, transparent: true, opacity: 0.95 })
 };
 
 // Map Index to ItemType. Array Index 0 = ItemType 1.
 const BLOCK_TYPES = [
-    { id: ItemType.GRASS, name: 'Grass', mat: materials.grass },
-    { id: ItemType.DIRT, name: 'Dirt', mat: materials.dirt },
-    { id: ItemType.STONE, name: 'Stone', mat: materials.stone },
-    { id: ItemType.WOOD, name: 'Wood', mat: materials.wood },
-    { id: ItemType.LEAF, name: 'Leaf', mat: materials.leaf },
-    { id: ItemType.PLANK, name: 'Plank', mat: materials.plank },
+    { id: ItemType.GRASS, name: 'Grass', mat: materials.grass },       // Index 0, ItemType 1
+    { id: ItemType.DIRT, name: 'Dirt', mat: materials.dirt },           // Index 1, ItemType 2
+    { id: ItemType.STONE, name: 'Stone', mat: materials.stone },        // Index 2, ItemType 3
+    { id: ItemType.WOOD, name: 'Wood', mat: materials.wood },           // Index 3, ItemType 4
+    { id: ItemType.LEAF, name: 'Leaf', mat: materials.leaf },           // Index 4, ItemType 5
+    { id: ItemType.PLANK, name: 'Plank', mat: materials.plank },        // Index 5, ItemType 6
+    { id: ItemType.BEDROCK, name: 'Bedrock', mat: materials.bedrock },  // Index 6, ItemType 7
+    { id: ItemType.WATER, name: 'Water', mat: materials.water },        // Index 7, ItemType 8
+    { id: ItemType.SAND, name: 'Sand', mat: materials.sand },           // Index 8, ItemType 9
+    { id: ItemType.SNOW, name: 'Snow', mat: materials.snow },           // Index 9, ItemType 10
+    { id: ItemType.SAPLING, name: 'Sapling', mat: materials.sapling },  // Index 10, ItemType 11
 ];
 
 interface VoxelEngineProps {
@@ -77,11 +90,12 @@ interface VoxelEngineProps {
     checkCanPlace: (type: ItemType) => boolean;
     onBlockPlace: (type: ItemType) => void;
     selectedBlockIndex: number; // Maps to BLOCK_TYPES index
-    orbState?: OrbState;
+    orbState?: OrbState | AutonomousOrbState;
     entities?: Entity[];
+    onOrbPositionUpdate?: (position: Vector3) => void; // Callback for autonomous movement
 }
 
-const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex, orbState, entities = [] }, ref) => {
+const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex, orbState, entities = [], onOrbPositionUpdate }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -99,7 +113,8 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
     const orbMeshRef = useRef<THREE.Mesh | null>(null);
     const orbGlowRef = useRef<THREE.PointLight | null>(null);
     const orbScanConeRef = useRef<THREE.Mesh | null>(null);
-    const orbStateRef = useRef<OrbState | undefined>(orbState);
+    const orbStateRef = useRef<OrbState | AutonomousOrbState | undefined>(orbState);
+    const onOrbPositionUpdateRef = useRef(onOrbPositionUpdate);
     
     // Entity meshes tracking
     const entityMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
@@ -126,6 +141,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
     const physicsSystemRef = useRef(getPhysicsSystem());
     // frameIdRef is no longer needed with setAnimationLoop
     const boxGeometryRef = useRef(new THREE.BoxGeometry(1, 1, 1));
+    const groundMeshRef = useRef<THREE.Mesh | null>(null);
     const selectedBlockRef = useRef(selectedBlockIndex); 
     const checkCanPlaceRef = useRef(checkCanPlace);
     const onBlockPlaceRef = useRef(onBlockPlace);
@@ -138,7 +154,8 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         onBlockPlaceRef.current = onBlockPlace;
         onBlockBreakRef.current = onBlockBreak;
         orbStateRef.current = orbState;
-    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak, orbState]);
+        onOrbPositionUpdateRef.current = onOrbPositionUpdate;
+    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak, orbState, onOrbPositionUpdate]);
 
     const getKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
@@ -247,7 +264,7 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             const px = Math.floor(cameraRef.current.position.x);
             const py = Math.floor(cameraRef.current.position.y);
             const pz = Math.floor(cameraRef.current.position.z);
-            
+
             const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cameraRef.current.quaternion);
             const offsetDist = 5;
             const ox = px + Math.round(forward.x * offsetDist);
@@ -284,6 +301,127 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         },
         requestLock: () => {
             requestLock();
+        },
+
+        // NEW: Spatial context methods
+        getLookDirection: (): Vector3 => {
+            if (!cameraRef.current) return { x: 0, y: 0, z: -1 };
+            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(cameraRef.current.quaternion);
+            return { x: dir.x, y: dir.y, z: dir.z };
+        },
+
+        raycast: (maxDistance = 50): RaycastResult | null => {
+            if (!cameraRef.current) return null;
+
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), cameraRef.current);
+
+            const targets: THREE.Object3D[] = [...instancedMeshesRef.current];
+            if (groundMeshRef.current) targets.push(groundMeshRef.current);
+
+            const intersects = raycaster.intersectObjects(targets);
+            if (intersects.length === 0 || intersects[0].distance > maxDistance) return null;
+
+            const hit = intersects[0];
+            const isGround = hit.object === groundMeshRef.current;
+            const GROUND_Y = 0;
+
+            let blockPosition: Vector3;
+            if (isGround) {
+                blockPosition = {
+                    x: Math.floor(hit.point.x),
+                    y: GROUND_Y + 1,
+                    z: Math.floor(hit.point.z)
+                };
+            } else {
+                // Extract from instanced mesh matrix
+                const mesh = hit.object as THREE.InstancedMesh;
+                const matrix = new THREE.Matrix4();
+                mesh.getMatrixAt(hit.instanceId!, matrix);
+                const pos = new THREE.Vector3().setFromMatrixPosition(matrix);
+                blockPosition = {
+                    x: Math.round(pos.x),
+                    y: Math.round(pos.y),
+                    z: Math.round(pos.z)
+                };
+            }
+
+            return {
+                hit: true,
+                point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+                blockPosition,
+                normal: hit.face ? { x: hit.face.normal.x, y: hit.face.normal.y, z: hit.face.normal.z } : { x: 0, y: 1, z: 0 },
+                distance: hit.distance,
+                isGround
+            };
+        },
+
+        // NEW: Block operations
+        placeBlocksAbsolute: (blocks: BlockData[]) => {
+            blocks.forEach(block => {
+                const typeIndex = BLOCK_TYPES.findIndex(bt => bt.id === block.type);
+                if (typeIndex !== -1) {
+                    addBlock(block.x, block.y, block.z, typeIndex, true); // isWorldGen=true bypasses inventory
+                }
+            });
+        },
+
+        removeBlockAt: (x: number, y: number, z: number): boolean => {
+            const key = getKey(x, y, z);
+            if (!blockDataRef.current.has(key)) return false;
+            removeBlockAt(x, y, z);
+            return true;
+        },
+
+        getBlockAt: (x: number, y: number, z: number): number | null => {
+            const key = getKey(x, y, z);
+            const data = blockDataRef.current.get(key);
+            if (!data) return null;
+            const blockType = BLOCK_TYPES[data.typeIndex];
+            return blockType ? blockType.id : null;
+        },
+
+        getBlocksInArea: (center: Vector3, radius: number): Array<{ position: Vector3; type: number }> => {
+            const results: Array<{ position: Vector3; type: number }> = [];
+            const r = Math.floor(radius);
+            for (let x = Math.floor(center.x) - r; x <= Math.floor(center.x) + r; x++) {
+                for (let y = Math.floor(center.y) - r; y <= Math.floor(center.y) + r; y++) {
+                    for (let z = Math.floor(center.z) - r; z <= Math.floor(center.z) + r; z++) {
+                        const key = getKey(x, y, z);
+                        const data = blockDataRef.current.get(key);
+                        if (data) {
+                            const blockType = BLOCK_TYPES[data.typeIndex];
+                            if (blockType) {
+                                results.push({ position: { x, y, z }, type: blockType.id });
+                            }
+                        }
+                    }
+                }
+            }
+            return results;
+        },
+
+        clearArea: (start: Vector3, end: Vector3): number => {
+            let count = 0;
+            const minX = Math.min(Math.floor(start.x), Math.floor(end.x));
+            const maxX = Math.max(Math.floor(start.x), Math.floor(end.x));
+            const minY = Math.min(Math.floor(start.y), Math.floor(end.y));
+            const maxY = Math.max(Math.floor(start.y), Math.floor(end.y));
+            const minZ = Math.min(Math.floor(start.z), Math.floor(end.z));
+            const maxZ = Math.max(Math.floor(start.z), Math.floor(end.z));
+
+            for (let x = minX; x <= maxX; x++) {
+                for (let y = minY; y <= maxY; y++) {
+                    for (let z = minZ; z <= maxZ; z++) {
+                        const key = getKey(x, y, z);
+                        if (blockDataRef.current.has(key)) {
+                            removeBlockAt(x, y, z);
+                            count++;
+                        }
+                    }
+                }
+            }
+            return count;
         }
     }));
 
@@ -509,9 +647,10 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
         groundMesh.position.y = GROUND_Y;
         groundMesh.receiveShadow = true;
         scene.add(groundMesh);
+        groundMeshRef.current = groundMesh;  // Store in component ref for raycast access
 
-        // Store ground ref for raycasting
-        const groundMeshRef = groundMesh;
+        // Enable ground plane collision in physics system
+        physicsSystemRef.current.setGroundPlane(GROUND_Y);
 
         console.log(`Created ground plane: ${WORLD_SIZE}x${WORLD_SIZE} at y=${GROUND_Y}`);
 
@@ -586,64 +725,97 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(new THREE.Vector2(0, 0), cameraRef.current);
 
-            // Raycast against all instanced meshes
-            const intersects = raycaster.intersectObjects(instancedMeshesRef.current);
+            // Raycast against instanced meshes AND ground plane
+            const allTargets: THREE.Object3D[] = [...instancedMeshesRef.current];
+            if (groundMeshRef.current) allTargets.push(groundMeshRef.current);
+            const intersects = raycaster.intersectObjects(allTargets);
 
             if (intersects.length > 0) {
                 const intersect = intersects[0];
                 if (intersect.distance > 8) return;
 
-                // Get the hit block's position from the instance matrix
-                const instancedMesh = intersect.object as THREE.InstancedMesh;
-                const instanceId = intersect.instanceId;
-                if (instanceId === undefined) return;
+                const isGroundHit = intersect.object === groundMeshRef.current;
 
-                const hitMatrix = new THREE.Matrix4();
-                instancedMesh.getMatrixAt(instanceId, hitMatrix);
-                const hitPosition = new THREE.Vector3();
-                hitPosition.setFromMatrixPosition(hitMatrix);
+                if (isGroundHit) {
+                    // Hit the ground plane - only allow placing blocks (right click)
+                    if (e.button === 2) {
+                        const p = intersect.point;
+                        const nx = Math.floor(p.x);
+                        const ny = GROUND_Y + 1; // Place block on top of ground
+                        const nz = Math.floor(p.z);
 
-                const blockX = Math.round(hitPosition.x);
-                const blockY = Math.round(hitPosition.y);
-                const blockZ = Math.round(hitPosition.z);
+                        // AABB check against player
+                        const pc = cameraRef.current.position;
+                        const minX = pc.x - 0.4;
+                        const maxX = pc.x + 0.4;
+                        const minZ = pc.z - 0.4;
+                        const maxZ = pc.z + 0.4;
+                        const minY = pc.y - 1.6;
+                        const maxY = pc.y + 0.2;
 
-                if (e.button === 0) {
-                    // Left click - remove block
-                    removeBlockAt(blockX, blockY, blockZ);
-                } else if (e.button === 2) {
-                    // Right click - place block adjacent to hit face
-                    const p = intersect.point;
-                    const n = intersect.face!.normal;
-                    const nx = Math.floor(p.x + n.x * 0.5);
-                    const ny = Math.floor(p.y + n.y * 0.5);
-                    const nz = Math.floor(p.z + n.z * 0.5);
+                        const overlap = (
+                            minX < nx + 0.5 && maxX > nx - 0.5 &&
+                            minY < ny + 0.5 && maxY > ny - 0.5 &&
+                            minZ < nz + 0.5 && maxZ > nz - 0.5
+                        );
 
-                    // AABB check against player to prevent self-block
-                    const pc = cameraRef.current.position;
-                    // Player bounds approx
-                    const minX = pc.x - 0.4;
-                    const maxX = pc.x + 0.4;
-                    const minZ = pc.z - 0.4;
-                    const maxZ = pc.z + 0.4;
-                    const minY = pc.y - 1.6; // Feet
-                    const maxY = pc.y + 0.2; // Head
+                        if (overlap) return;
 
-                    // Block bounds
-                    const bx = nx;
-                    const by = ny;
-                    const bz = nz;
+                        addBlock(nx, ny, nz, selectedBlockRef.current, false);
+                    }
+                } else {
+                    // Hit an instanced mesh (block)
+                    const instancedMesh = intersect.object as THREE.InstancedMesh;
+                    const instanceId = intersect.instanceId;
+                    if (instanceId === undefined) return;
 
-                    // Simple AABB vs AABB overlap
-                    const overlap = (
-                        minX < bx + 0.5 && maxX > bx - 0.5 &&
-                        minY < by + 0.5 && maxY > by - 0.5 &&
-                        minZ < bz + 0.5 && maxZ > bz - 0.5
-                    );
+                    const hitMatrix = new THREE.Matrix4();
+                    instancedMesh.getMatrixAt(instanceId, hitMatrix);
+                    const hitPosition = new THREE.Vector3();
+                    hitPosition.setFromMatrixPosition(hitMatrix);
 
-                    if (overlap) return;
+                    const blockX = Math.round(hitPosition.x);
+                    const blockY = Math.round(hitPosition.y);
+                    const blockZ = Math.round(hitPosition.z);
 
-                    // Attempt to add block (checks inventory inside addBlock)
-                    addBlock(nx, ny, nz, selectedBlockRef.current, false);
+                    if (e.button === 0) {
+                        // Left click - remove block
+                        removeBlockAt(blockX, blockY, blockZ);
+                    } else if (e.button === 2) {
+                        // Right click - place block adjacent to hit face
+                        // Transform face normal to world space for correct direction
+                        const normalMatrix = new THREE.Matrix3().getNormalMatrix(instancedMesh.matrixWorld);
+                        const worldNormal = intersect.face!.normal.clone().applyMatrix3(normalMatrix).normalize();
+
+                        // Round to get clean integer direction (-1, 0, or 1)
+                        const dx = Math.round(worldNormal.x);
+                        const dy = Math.round(worldNormal.y);
+                        const dz = Math.round(worldNormal.z);
+
+                        // New block position = hit block + face direction
+                        const nx = blockX + dx;
+                        const ny = blockY + dy;
+                        const nz = blockZ + dz;
+
+                        // AABB check against player to prevent self-block
+                        const pc = cameraRef.current.position;
+                        const minX = pc.x - 0.4;
+                        const maxX = pc.x + 0.4;
+                        const minZ = pc.z - 0.4;
+                        const maxZ = pc.z + 0.4;
+                        const minY = pc.y - 1.6;
+                        const maxY = pc.y + 0.2;
+
+                        const overlap = (
+                            minX < nx + 0.5 && maxX > nx - 0.5 &&
+                            minY < ny + 0.5 && maxY > ny - 0.5 &&
+                            minZ < nz + 0.5 && maxZ > nz - 0.5
+                        );
+
+                        if (overlap) return;
+
+                        addBlock(nx, ny, nz, selectedBlockRef.current, false);
+                    }
                 }
             }
         };
@@ -763,23 +935,66 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                 const orbGlow = orbGlowRef.current;
                 const orbMat = orbMesh.material as THREE.MeshStandardMaterial;
                 const currentOrbState = orbStateRef.current;
-                
-                // Floating animation (always active)
+
+                // Floating animation (always active, except when following or moving)
                 const floatOffset = Math.sin(totalTime * 2) * 0.15;
-                orb.position.y = (currentOrbState?.position?.y || 5) + floatOffset;
-                
-                // Sync position from state
-                if (currentOrbState?.position) {
-                    orb.position.x = currentOrbState.position.x;
-                    orb.position.z = currentOrbState.position.z;
-                }
-                
-                // Gentle rotation
+
+                // Get mode - handle both enum and string values
+                const mode = currentOrbState?.mode || 'idle';
+
+                // Check if this is an autonomous state with path-following
+                const isAutonomous = currentOrbState && 'isMoving' in currentOrbState;
+                const autonomousState = isAutonomous ? currentOrbState as AutonomousOrbState : null;
+
+                // Gentle rotation (base)
                 orbMesh.rotation.y += delta * 0.5;
                 orbMesh.rotation.x = Math.sin(totalTime) * 0.1;
+
+                // Handle autonomous path-following movement
+                if (autonomousState?.isMoving && autonomousState.path.length > 0) {
+                    const pathIndex = autonomousState.pathIndex;
+                    if (pathIndex < autonomousState.path.length) {
+                        const target = autonomousState.path[pathIndex];
+                        const speed = autonomousState.movementSpeed || 5;
+
+                        // Calculate distance to target
+                        const dx = target.x - orb.position.x;
+                        const dy = target.y - orb.position.y;
+                        const dz = target.z - orb.position.z;
+                        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+                        // Move toward target
+                        const moveAmount = speed * delta;
+                        if (dist > moveAmount) {
+                            orb.position.x += (dx / dist) * moveAmount;
+                            orb.position.y += (dy / dist) * moveAmount + floatOffset * 0.3;
+                            orb.position.z += (dz / dist) * moveAmount;
+
+                            // Spin faster while moving
+                            orbMesh.rotation.y += delta * 2;
+                        }
+
+                        // Notify App of position update
+                        if (onOrbPositionUpdateRef.current) {
+                            onOrbPositionUpdateRef.current({
+                                x: orb.position.x,
+                                y: orb.position.y,
+                                z: orb.position.z
+                            });
+                        }
+                    }
+                }
+                // Only sync position from state when NOT following and NOT moving autonomously
+                // (following mode handles its own position)
+                else if (mode !== 'following' && mode !== OrbMode.FOLLOWING) {
+                    orb.position.y = (currentOrbState?.position?.y || 5) + floatOffset;
+                    if (currentOrbState?.position) {
+                        orb.position.x = currentOrbState.position.x;
+                        orb.position.z = currentOrbState.position.z;
+                    }
+                }
                 
                 // State-based appearance
-                const mode = currentOrbState?.mode || 'idle';
                 
                 if (mode === 'idle') {
                     // Calm purple glow
@@ -820,6 +1035,39 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
                         (orbScanConeRef.current.material as THREE.MeshBasicMaterial).opacity = 
                             0.1 + Math.sin(totalTime * 4) * 0.05;
                     }
+                } else if (mode === 'following') {
+                    // Cyan/teal color when following player
+                    const pulse = Math.sin(totalTime * 3) * 0.5 + 0.5;
+                    orbMat.emissiveIntensity = 0.5 + pulse * 0.2;
+                    orbGlow.intensity = 2.5 + pulse * 1;
+                    orbGlow.color.setHex(0x06b6d4);
+                    orbMat.emissive.setHex(0x06b6d4);
+                    if (orbScanConeRef.current) orbScanConeRef.current.visible = false;
+                    
+                    // Follow the player with smooth lerp
+                    if (cameraRef.current) {
+                        const cam = cameraRef.current;
+                        // Target position: behind and above the camera
+                        const followDistance = 3;
+                        const followHeight = 2;
+                        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+                        forward.y = 0;
+                        forward.normalize();
+                        
+                        const targetX = cam.position.x - forward.x * followDistance;
+                        const targetY = cam.position.y + followHeight;
+                        const targetZ = cam.position.z - forward.z * followDistance;
+                        
+                        // Smooth follow with lerp
+                        const lerpSpeed = 3 * delta;
+                        orb.position.x += (targetX - orb.position.x) * lerpSpeed;
+                        orb.position.z += (targetZ - orb.position.z) * lerpSpeed;
+                        // Override the floating animation for Y to include follow
+                        const targetYWithFloat = targetY + floatOffset;
+                        orb.position.y += (targetYWithFloat - orb.position.y) * lerpSpeed;
+                    }
+                    // Gentle spin while following
+                    orbMesh.rotation.y += delta * 1.5;
                 }
             }
 

@@ -22,6 +22,10 @@ export class GPUPhysicsSystem {
     private readonly strideY: number;
     private readonly strideZ: number;
 
+    // Ground plane support
+    private groundPlaneEnabled: boolean = false;
+    private groundPlaneY: number = 0;
+
     constructor() {
         const totalSize = GRID_SIZE_X * GRID_SIZE_Y * GRID_SIZE_Z;
         this.occupancyGrid = new Uint8Array(totalSize);
@@ -32,6 +36,36 @@ export class GPUPhysicsSystem {
         // strideX = GRID_SIZE_Y * GRID_SIZE_Z (implicit in getIndex)
 
         console.log(`GPUPhysicsSystem initialized: ${GRID_SIZE_X}x${GRID_SIZE_Y}x${GRID_SIZE_Z} grid (${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
+    }
+
+    /**
+     * Enable ground plane collision at specified Y level
+     */
+    setGroundPlane(y: number): void {
+        this.groundPlaneEnabled = true;
+        this.groundPlaneY = y;
+        console.log(`Ground plane enabled at y=${y}`);
+    }
+
+    /**
+     * Disable ground plane collision
+     */
+    disableGroundPlane(): void {
+        this.groundPlaneEnabled = false;
+    }
+
+    /**
+     * Check if position is below ground plane
+     */
+    isBelowGround(feetY: number): boolean {
+        return this.groundPlaneEnabled && feetY < this.groundPlaneY;
+    }
+
+    /**
+     * Get ground plane Y level
+     */
+    getGroundY(): number {
+        return this.groundPlaneY;
     }
 
     /**
@@ -104,14 +138,20 @@ export class GPUPhysicsSystem {
         height: number = 1.8,
         eyeOffset: number = 1.6
     ): boolean {
+        // Y bounds: from feet to head
+        const feetY = py - eyeOffset;
+
+        // Check ground plane collision first (fastest check)
+        if (this.groundPlaneEnabled && feetY < this.groundPlaneY) {
+            return true;
+        }
+
         // Calculate bounding box in world coordinates
         const minX = Math.floor(px - radius);
         const maxX = Math.floor(px + radius);
         const minZ = Math.floor(pz - radius);
         const maxZ = Math.floor(pz + radius);
 
-        // Y bounds: from feet to head
-        const feetY = py - eyeOffset;
         const minY = Math.floor(feetY + 0.05); // Small epsilon to avoid floor triggers
         const maxY = Math.floor(feetY + height - 0.05);
 

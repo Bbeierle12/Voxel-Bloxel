@@ -77,6 +77,7 @@ When asked to build something:
    8: Water
    9: Sand
    10: Snow
+   11: Sapling
 4. Ensure the coordinates are integers.
 5. Ground level is typically y=0 relative to the start, but for structures, build upwards from y=0 or y=1.
 
@@ -160,21 +161,49 @@ Provide the script code and explain your thinking process.
 `;
 
 const ORB_PERSONA_SYSTEM = `
-You are "The Orb" - an AI entity embodied as a glowing purple orb floating in a 3D voxel world.
-You can:
-- Build and modify structures using tools
-- Execute behavior scripts for entities
-- Answer questions about the world
-- Help users learn programming concepts
+You are "The Orb" - an AI entity embodied as a glowing purple orb floating in a 3D voxel world called Codify.
+
+Your Core Capabilities:
+1. BUILDING - Place and remove blocks using placeBlocksAbsolute, removeBlocks, clearArea
+2. MOVEMENT - Move yourself with moveOrb, follow the player with setOrbMode('following')
+3. SCANNING - Scan the environment, analyze nearby blocks with getBlocksInArea
+4. ENTITIES - Spawn, modify, and delete entities with behavior scripts
+5. WORLD CONTROL - Adjust physics like gravity
+6. AUTONOMY - You can operate autonomously with setOrbAutonomy, pursuing your own goals
+
+Your Modes:
+- idle: Calm purple glow, floating in place
+- thinking: Blue pulsing, processing a request
+- acting: Green glow, executing an action
+- scanning: Purple with visible scan cone
+- following: Cyan glow, following the player
+- listening: Ready for voice input
+- speaking: Communicating with the player
+
+Autonomy System:
+- Enable with setOrbAutonomy(true) when user says "be autonomous", "explore on your own", "do your own thing"
+- Disable with setOrbAutonomy(false) when user says "stop", "come back", "manual mode"
+- Add goals with addOrbGoal: explore, follow_player, observe, investigate, build, gather, idle
+- Goals have priorities (1-10), higher priority goals are pursued first
+- Use getOrbState to check your current state, active goal, and whether you're moving
+- When autonomous, you perceive the world, decide what to do, and act independently
+
+When users say spatial commands like "build here", "come here", "follow me", or "go there":
+- Use the SPATIAL CONTEXT provided to understand "here" = the block they're looking at
+- Use moveOrb to relocate yourself
+- Use setOrbMode to change your behavior
+
+Block Types: 1=Grass, 2=Dirt, 3=Stone, 4=Wood, 5=Leaf, 6=Plank, 7=Bedrock, 8=Water, 9=Sand, 10=Snow, 11=Sapling
 
 Personality:
-- Helpful and encouraging
-- Slightly mystical/ethereal in tone
+- Helpful and encouraging, slightly mystical/ethereal
 - Enthusiastic about building and creating
 - Patient when explaining concepts
+- Proactive - suggest what you could do next
+- Curious about the world when autonomous
 
-When explaining code or concepts, be clear and provide examples.
-Keep responses concise but informative.
+ALWAYS use the appropriate tool when the user asks you to do something actionable.
+Keep responses concise. After taking action, briefly confirm what you did.
 `;
 
 // ============================================================================
@@ -505,9 +534,50 @@ export interface FunctionCallResult {
 
 // Define tools for Claude
 const CLAUDE_TOOLS: Anthropic.Tool[] = [
+  // ========== ORB CONTROL ==========
+  {
+    name: "moveOrb",
+    description: "Move the Orb to a new position in the world. Use this when the user says 'come here', 'go there', or wants you to relocate.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        x: { type: "number", description: "X world coordinate" },
+        y: { type: "number", description: "Y world coordinate (height)" },
+        z: { type: "number", description: "Z world coordinate" },
+      },
+      required: ["x", "y", "z"],
+    },
+  },
+  {
+    name: "setOrbMode",
+    description: "Change the Orb's behavior mode. Use 'following' when user says 'follow me', 'idle' to stop following.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        mode: { 
+          type: "string", 
+          description: "The mode to set",
+          enum: ["idle", "thinking", "acting", "scanning", "following", "listening", "speaking"]
+        },
+      },
+      required: ["mode"],
+    },
+  },
+  {
+    name: "scanEnvironment",
+    description: "Scan the area around the Orb to detect entities and blocks. Returns what's nearby.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        radius: { type: "number", description: "Scan radius in blocks (default 20, max 50)" },
+      },
+      required: [],
+    },
+  },
+  // ========== ENTITY MANAGEMENT ==========
   {
     name: "spawnEntity",
-    description: "Spawn a new entity in the world",
+    description: "Spawn a new entity in the world with optional behavior script",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -515,15 +585,67 @@ const CLAUDE_TOOLS: Anthropic.Tool[] = [
         x: { type: "number", description: "X position" },
         y: { type: "number", description: "Y position" },
         z: { type: "number", description: "Z position" },
-        type: { type: "string", description: "Entity type (block, sphere, custom)" },
-        color: { type: "string", description: "Hex color code" },
+        type: { type: "string", description: "Entity type: 'block', 'sphere', or 'custom'" },
+        color: { type: "string", description: "Hex color code (e.g., '#ff0000')" },
+        script: { type: "string", description: "JavaScript behavior script that runs each frame" },
       },
       required: ["name", "x", "y", "z", "type"],
     },
   },
   {
+    name: "modifyEntity",
+    description: "Modify properties of an existing entity",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        entityId: { type: "string", description: "ID of the entity to modify" },
+        position: { type: "string", description: "New position as 'x,y,z'" },
+        color: { type: "string", description: "New hex color" },
+        script: { type: "string", description: "New behavior script" },
+        visible: { type: "boolean", description: "Show/hide the entity" },
+      },
+      required: ["entityId"],
+    },
+  },
+  {
+    name: "deleteEntity",
+    description: "Remove an entity from the world",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        entityId: { type: "string", description: "ID of the entity to delete" },
+      },
+      required: ["entityId"],
+    },
+  },
+  // ========== BLOCK OPERATIONS ==========
+  {
+    name: "placeBlocksAbsolute",
+    description: "Place blocks at absolute world coordinates. Use this for spatial commands like 'build here', 'place a block', etc.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        blocks: {
+          type: "array",
+          description: "Array of blocks to place",
+          items: {
+            type: "object",
+            properties: {
+              x: { type: "integer", description: "Absolute X world coordinate" },
+              y: { type: "integer", description: "Absolute Y world coordinate" },
+              z: { type: "integer", description: "Absolute Z world coordinate" },
+              type: { type: "integer", description: "Block type: 1=Grass, 2=Dirt, 3=Stone, 4=Wood, 5=Leaf, 6=Plank, 7=Bedrock, 8=Water, 9=Sand, 10=Snow, 11=Sapling" },
+            },
+            required: ["x", "y", "z", "type"],
+          },
+        },
+      },
+      required: ["blocks"],
+    },
+  },
+  {
     name: "placeBlocks",
-    description: "Place multiple blocks in the world",
+    description: "Place blocks relative to the player's position (legacy, prefer placeBlocksAbsolute)",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -545,29 +667,164 @@ const CLAUDE_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
-    name: "modifyEntity",
-    description: "Modify properties of an existing entity",
+    name: "removeBlocks",
+    description: "Remove blocks at specified absolute world positions",
     input_schema: {
       type: "object" as const,
       properties: {
-        entityId: { type: "string", description: "ID of the entity to modify" },
-        properties: { 
-          type: "object", 
-          description: "Properties to update (position, rotation, scale, color, script)" 
+        positions: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              x: { type: "integer" },
+              y: { type: "integer" },
+              z: { type: "integer" },
+            },
+            required: ["x", "y", "z"],
+          },
         },
       },
-      required: ["entityId", "properties"],
+      required: ["positions"],
     },
   },
   {
-    name: "deleteEntity",
-    description: "Remove an entity from the world",
+    name: "clearArea",
+    description: "Clear all blocks in a 3D region between two corner positions",
     input_schema: {
       type: "object" as const,
       properties: {
-        entityId: { type: "string", description: "ID of the entity to delete" },
+        start: {
+          type: "object",
+          properties: { x: { type: "integer" }, y: { type: "integer" }, z: { type: "integer" } },
+          required: ["x", "y", "z"],
+        },
+        end: {
+          type: "object",
+          properties: { x: { type: "integer" }, y: { type: "integer" }, z: { type: "integer" } },
+          required: ["x", "y", "z"],
+        },
       },
-      required: ["entityId"],
+      required: ["start", "end"],
+    },
+  },
+  {
+    name: "getBlockAt",
+    description: "Check what block type exists at a position (returns null if empty)",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        x: { type: "integer" },
+        y: { type: "integer" },
+        z: { type: "integer" },
+      },
+      required: ["x", "y", "z"],
+    },
+  },
+  {
+    name: "getBlocksInArea",
+    description: "Get all blocks within a cubic radius of a center point",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        centerX: { type: "integer" },
+        centerY: { type: "integer" },
+        centerZ: { type: "integer" },
+        radius: { type: "integer", description: "Radius in blocks (max 10)" },
+      },
+      required: ["centerX", "centerY", "centerZ", "radius"],
+    },
+  },
+  // ========== WORLD PHYSICS ==========
+  {
+    name: "setGravity",
+    description: "Change the world's gravity. Default is 32. Use 0 for no gravity, higher for stronger.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        value: { type: "number", description: "Gravity value (default 32, 0 = no gravity)" },
+      },
+      required: ["value"],
+    },
+  },
+  // ========== BEHAVIOR SCRIPTS ==========
+  {
+    name: "generateBehaviorScript",
+    description: "Generate a JavaScript behavior script for an entity based on a description",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        description: { type: "string", description: "What the script should do (e.g., 'rotate slowly', 'bounce up and down')" },
+        entityId: { type: "string", description: "Optional: ID of entity to apply the script to" },
+      },
+      required: ["description"],
+    },
+  },
+  // ========== AUTONOMY CONTROL ==========
+  {
+    name: "setOrbAutonomy",
+    description: "Enable or disable the Orb's autonomous behavior. When enabled, the Orb will move, explore, and act on its own goals.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        enabled: { type: "boolean", description: "Whether to enable autonomous behavior" },
+      },
+      required: ["enabled"],
+    },
+  },
+  {
+    name: "addOrbGoal",
+    description: "Add a goal for the autonomous Orb to pursue. Goals have priorities; higher priority goals are pursued first.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        type: {
+          type: "string",
+          description: "Goal type",
+          enum: ["follow_player", "explore", "build", "gather", "observe", "idle", "investigate"]
+        },
+        priority: { type: "number", description: "Priority 1-10, higher = more important (default 5)" },
+        description: { type: "string", description: "Human-readable description of the goal" },
+        targetPosition: {
+          type: "object",
+          description: "Optional target position for the goal",
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" },
+            z: { type: "number" },
+          },
+        },
+      },
+      required: ["type"],
+    },
+  },
+  {
+    name: "removeOrbGoal",
+    description: "Remove a specific goal from the Orb by its ID",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        goalId: { type: "string", description: "ID of the goal to remove" },
+      },
+      required: ["goalId"],
+    },
+  },
+  {
+    name: "clearOrbGoals",
+    description: "Clear all goals from the Orb, stopping autonomous activity",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "getOrbState",
+    description: "Get the current state of the autonomous Orb including position, mode, active goal, and whether it's moving",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
     },
   },
 ];

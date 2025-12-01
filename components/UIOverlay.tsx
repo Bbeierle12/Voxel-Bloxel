@@ -177,10 +177,20 @@ const UIOverlay: React.FC<UIOverlayProps> = ({
         if (showInventory) setShowInventory(false);
         if (showSidebar && onToggleSidebar) onToggleSidebar();
       }
+
+      // Number keys 1-6 to select hotbar slots
+      if (isLocked && !showChat && !showInventory && !showSidebar) {
+        const numKey = e.code.match(/^Digit([1-6])$/);
+        if (numKey) {
+          const slotIndex = parseInt(numKey[1], 10) - 1; // Convert 1-6 to 0-5
+          onSlotSelect(slotIndex);
+          e.preventDefault();
+        }
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isLocked, showChat, showInventory, showSidebar, onToggleSidebar, onSidebarTabChange]);
+  }, [isLocked, showChat, showInventory, showSidebar, onToggleSidebar, onSidebarTabChange, onSlotSelect]);
 
   const handleAiSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

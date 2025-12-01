@@ -9,9 +9,13 @@ import {
   ItemType,
   Recipe,
   Entity,
+  EntityType,
   WorldState,
   OrbState,
   OrbMode,
+  AutonomousOrbState,
+  AIGoalType,
+  WorldContext,
   AgentWorkflow,
   AgentPhase,
   AgentStep,
@@ -24,10 +28,12 @@ import {
   Vector3,
   createDefaultEntity,
   createDefaultWorldState,
-  createDefaultOrbState,
+  createDefaultAutonomousOrbState,
   createDefaultAgentWorkflow,
   createDefaultSystemState,
 } from './types';
+import { createOrbBrain, OrbBrain, OrbBrainCallbacks } from './services/ai/orbBrain';
+import { createWorldMind, WorldMind, WorldMindCallbacks } from './services/ai/worldMind';
 import { generateAgentPlan, chatWithTools, generateBehaviorScript } from './services/geminiService';
 import { logInfo, logSystem, logAI, logError, logWarn } from './components/ConsolePanel';
 
@@ -69,8 +75,17 @@ function App() {
   // World State (entities, physics)
   const [worldState, setWorldState] = useState<WorldState>(createDefaultWorldState());
 
-  // AI Orb State
-  const [orbState, setOrbState] = useState<OrbState>(createDefaultOrbState());
+  // AI Orb State (now with autonomy)
+  const [orbState, setOrbState] = useState<AutonomousOrbState>(createDefaultAutonomousOrbState());
+  const orbBrainRef = useRef<OrbBrain | null>(null);
+
+  // WorldMind - Living Environment AI
+  const worldMindRef = useRef<WorldMind | null>(null);
+  const [worldMindStats, setWorldMindStats] = useState({
+    isActive: false,
+    grassSpread: 0,
+    leavesDecayed: 0,
+  });
 
   // Agent Workflow
   const [agentWorkflow, setAgentWorkflow] = useState<AgentWorkflow>(createDefaultAgentWorkflow());
@@ -101,6 +116,22 @@ function App() {
     setSystemState((prev) => ({
       ...prev,
       logs: [...prev.logs.slice(-99), log], // Keep last 100 logs
+    }));
+  }, []);
+
+  // ============================================================================
+  // ORB POSITION UPDATE (from VoxelEngine animation loop)
+  // ============================================================================
+
+  const handleOrbPositionUpdate = useCallback((position: Vector3) => {
+    // Update the brain's internal position tracking
+    if (orbBrainRef.current) {
+      orbBrainRef.current.updatePosition(position);
+    }
+    // Also update state for UI
+    setOrbState((prev) => ({
+      ...prev,
+      position,
     }));
   }, []);
 
@@ -227,8 +258,13 @@ function App() {
         };
       });
 
-      // Update orb animation (floating)
+      // Update orb animation (floating) - only when autonomy is disabled
       setOrbState((prev) => {
+        // Skip manual animation when autonomy is enabled (brain handles movement)
+        if (prev.autonomyEnabled) {
+          return prev;
+        }
+        // Manual floating animation for non-autonomous mode
         if (prev.mode === OrbMode.IDLE) {
           return {
             ...prev,
@@ -258,6 +294,164 @@ function App() {
   }, []);
 
   // ============================================================================
+  // ORB BRAIN INITIALIZATION
+  // ============================================================================
+
+  // Create world context provider for the brain
+  const getWorldContext = useCallback((): WorldContext => {
+    const playerPos = engineRef.current?.getPlayerPosition() || { x: 0, y: 0, z: 0 };
+    const lookDir = engineRef.current?.getLookDirection() || { x: 0, y: 0, z: -1 };
+
+    return {
+      playerPosition: playerPos,
+      playerLookDirection: lookDir,
+      timeOfDay: worldState.timeOfDay,
+      entities: worldState.entities.map(e => ({
+        ...e,
+        type: e.type as EntityType,
+      })),
+      getBlocksInArea: (center: Vector3, radius: number) => {
+        return engineRef.current?.getBlocksInArea(center, radius) || [];
+      },
+    };
+  }, [worldState.timeOfDay, worldState.entities]);
+
+  // Store getWorldContext in a ref for the brain callbacks
+  const getWorldContextRef = useRef(getWorldContext);
+  useEffect(() => {
+    getWorldContextRef.current = getWorldContext;
+  }, [getWorldContext]);
+
+  // Initialize OrbBrain
+  useEffect(() => {
+    // Create callbacks for the brain
+    const callbacks: OrbBrainCallbacks = {
+      onToolExecute: async (name: string, args: Record<string, unknown>) => {
+        // Forward tool execution to executeTool
+        // This will be set up after executeTool is defined
+        return { success: true };
+      },
+      onSpeak: (message: string) => {
+        addLog(logAI(`Orb says: ${message}`, 'orb'));
+        // Could add speech synthesis here
+      },
+      onStateChange: (state: AutonomousOrbState) => {
+        setOrbState(state);
+      },
+      getWorldContext: () => getWorldContextRef.current(),
+    };
+
+    // Create the brain
+    const brain = createOrbBrain(callbacks, {
+      position: orbState.position,
+      autonomyEnabled: false, // Start disabled, user can enable
+    });
+    orbBrainRef.current = brain;
+
+    // Start the brain's tick loop
+    brain.start();
+    addLog(logSystem('OrbBrain autonomous system initialized', 'ai'));
+
+    return () => {
+      brain.stop();
+      addLog(logSystem('OrbBrain stopped', 'ai'));
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Update brain's tool execution callback when executeTool changes
+  useEffect(() => {
+    if (orbBrainRef.current) {
+      // The brain's callbacks are set at construction, but we can
+      // update the tool execution through the state change callback
+      // which handles building actions
+    }
+  }, []);
+
+  // ============================================================================
+  // WORLDMIND INITIALIZATION - Living Environment AI
+  // ============================================================================
+
+  useEffect(() => {
+    // Wait a bit for the engine to be ready
+    const initTimer = setTimeout(() => {
+      if (!engineRef.current) {
+        console.log('[WorldMind] Engine not ready, skipping initialization');
+        return;
+      }
+
+      // Create callbacks for the WorldMind
+      const callbacks: WorldMindCallbacks = {
+        getPlayerPosition: () => {
+          return engineRef.current?.getPlayerPosition() || { x: 0, y: 0, z: 0 };
+        },
+        getBlockAt: (x: number, y: number, z: number) => {
+          return engineRef.current?.getBlockAt(x, y, z) ?? null;
+        },
+        getBlocksInArea: (center, radius) => {
+          return engineRef.current?.getBlocksInArea(center, radius) || [];
+        },
+        placeBlock: (x: number, y: number, z: number, type: number) => {
+          if (engineRef.current) {
+            engineRef.current.placeBlocksAbsolute([{ x, y, z, type }]);
+          }
+        },
+        removeBlock: (x: number, y: number, z: number) => {
+          if (engineRef.current) {
+            engineRef.current.removeBlockAt(x, y, z);
+          }
+        },
+        getTimeOfDay: () => {
+          return worldState.timeOfDay;
+        },
+        onWorldEvent: (event) => {
+          // Log world events occasionally (not every one to avoid spam)
+          if (Math.random() < 0.15) {
+            if (event.type === 'grass_spread') {
+              addLog(logInfo(`🌱 Grass spread at (${event.position.x}, ${event.position.z})`, 'world'));
+            } else if (event.type === 'leaf_decay') {
+              addLog(logInfo(`🍂 Leaf decayed at (${event.position.x}, ${event.position.y}, ${event.position.z})`, 'world'));
+            } else if (event.type === 'sapling_drop') {
+              addLog(logInfo(`🌰 Sapling dropped at (${event.position.x}, ${event.position.z})`, 'world'));
+            } else if (event.type === 'tree_grow') {
+              addLog(logInfo(`🌳 Tree grew at (${event.position.x}, ${event.position.z})!`, 'world'));
+            }
+          }
+          // Update stats
+          setWorldMindStats((prev) => ({
+            ...prev,
+            grassSpread: prev.grassSpread + (event.type === 'grass_spread' ? 1 : 0),
+            leavesDecayed: prev.leavesDecayed + (event.type === 'leaf_decay' ? 1 : 0),
+          }));
+        },
+      };
+
+      // Create and start the WorldMind
+      const mind = createWorldMind(callbacks, {
+        tickRate: 1000, // 1 second between ticks
+        perceptionRadius: 32, // Perceive 32 blocks around player
+        maxChangesPerTick: 15, // Max 15 block changes per tick
+      });
+      worldMindRef.current = mind;
+
+      // Start the world's consciousness
+      mind.start();
+      setWorldMindStats((prev) => ({ ...prev, isActive: true }));
+      addLog(logSystem('🌍 WorldMind awakened - the world is now alive', 'world'));
+    }, 2000); // Wait 2 seconds for engine to initialize
+
+    return () => {
+      clearTimeout(initTimer);
+      if (worldMindRef.current) {
+        worldMindRef.current.stop();
+        setWorldMindStats((prev) => ({ ...prev, isActive: false }));
+        addLog(logSystem('🌍 WorldMind dormant', 'world'));
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ============================================================================
   // AI TOOL EXECUTION
   // ============================================================================
 
@@ -266,6 +460,121 @@ function App() {
       addLog(logAI(`Executing tool: ${name}`, 'orb', args));
 
       switch (name) {
+        // ========== ORB CONTROL ==========
+        case 'moveOrb': {
+          const x = (args.x as number) || 0;
+          const y = (args.y as number) || 5;
+          const z = (args.z as number) || 0;
+          
+          setOrbState((prev) => ({
+            ...prev,
+            position: { x, y, z },
+            mode: OrbMode.ACTING,
+          }));
+          
+          // Also move the 3D orb mesh
+          if (engineRef.current) {
+            engineRef.current.moveOrb(x, y, z);
+          }
+          
+          // Return to idle after movement animation
+          setTimeout(() => {
+            setOrbState((prev) => ({ ...prev, mode: OrbMode.IDLE }));
+          }, 1000);
+          
+          addLog(logInfo(`Orb moved to (${x}, ${y}, ${z})`, 'orb'));
+          return { success: true, position: { x, y, z } };
+        }
+
+        case 'setOrbMode': {
+          const mode = args.mode as string;
+          const modeMap: Record<string, OrbMode> = {
+            'idle': OrbMode.IDLE,
+            'thinking': OrbMode.THINKING,
+            'acting': OrbMode.ACTING,
+            'scanning': OrbMode.SCANNING,
+            'following': OrbMode.FOLLOWING,
+            'listening': OrbMode.LISTENING,
+            'speaking': OrbMode.SPEAKING,
+          };
+          
+          const orbMode = modeMap[mode] || OrbMode.IDLE;
+          setOrbState((prev) => ({ ...prev, mode: orbMode }));
+          addLog(logInfo(`Orb mode set to: ${mode}`, 'orb'));
+          return { success: true, mode };
+        }
+
+        case 'scanEnvironment': {
+          const radius = Math.min((args.radius as number) || 20, 50);
+          setOrbState((prev) => ({ ...prev, mode: OrbMode.SCANNING, scanRadius: radius }));
+
+          // Get nearby blocks
+          const orbPos = engineRef.current?.getOrbPosition() || orbState.position;
+          const nearbyBlocks = engineRef.current?.getBlocksInArea(
+            { x: Math.floor(orbPos.x), y: Math.floor(orbPos.y), z: Math.floor(orbPos.z) },
+            Math.min(radius, 10)
+          ) || [];
+
+          // Get nearby entities
+          const nearbyEntities = worldState.entities.filter((e) => {
+            const dx = e.position.x - orbPos.x;
+            const dy = e.position.y - orbPos.y;
+            const dz = e.position.z - orbPos.z;
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) < radius;
+          });
+
+          setTimeout(() => {
+            setOrbState((prev) => ({ ...prev, mode: OrbMode.IDLE }));
+          }, 2000);
+
+          addLog(logInfo(`Scanned area: ${nearbyBlocks.length} blocks, ${nearbyEntities.length} entities`, 'orb'));
+          return {
+            success: true,
+            blocksFound: nearbyBlocks.length,
+            entitiesFound: nearbyEntities.length,
+            entities: nearbyEntities.map((e) => ({
+              id: e.id,
+              name: e.name,
+              position: e.position,
+            })),
+            blockSummary: nearbyBlocks.reduce((acc, b) => {
+              acc[b.type] = (acc[b.type] || 0) + 1;
+              return acc;
+            }, {} as Record<number, number>),
+          };
+        }
+
+        case 'generateBehaviorScript': {
+          const description = args.description as string;
+          const entityId = args.entityId as string | undefined;
+          
+          setOrbState((prev) => ({ ...prev, mode: OrbMode.THINKING }));
+          
+          try {
+            const result = await generateBehaviorScript(description);
+            
+            // If entityId provided, apply the script
+            if (entityId && result.content) {
+              // Extract code from the response (look for code blocks)
+              const codeMatch = result.content.match(/```(?:javascript|js)?\s*([\s\S]*?)```/);
+              const script = codeMatch ? codeMatch[1].trim() : result.content;
+              
+              setWorldState((prev) => ({
+                ...prev,
+                entities: prev.entities.map((e) =>
+                  e.id === entityId ? { ...e, script } : e
+                ),
+              }));
+              addLog(logInfo(`Applied behavior script to entity ${entityId}`, 'orb'));
+            }
+            
+            return { success: true, script: result.content, thinking: result.thinking };
+          } finally {
+            setOrbState((prev) => ({ ...prev, mode: OrbMode.IDLE }));
+          }
+        }
+
+        // ========== ENTITY MANAGEMENT ==========
         case 'spawnEntity': {
           const newEntity = createDefaultEntity({
             name: (args.name as string) || 'AI Entity',
@@ -295,32 +604,6 @@ function App() {
           }));
           addLog(logSystem(`Gravity set to ${value}`, 'physics'));
           return { success: true, gravity: value };
-        }
-
-        case 'scanEnvironment': {
-          const radius = (args.radius as number) || 20;
-          setOrbState((prev) => ({ ...prev, mode: OrbMode.SCANNING, scanRadius: radius }));
-
-          // Simulate scan
-          const nearbyEntities = worldState.entities.filter((e) => {
-            const dx = e.position.x - orbState.position.x;
-            const dy = e.position.y - orbState.position.y;
-            const dz = e.position.z - orbState.position.z;
-            return Math.sqrt(dx * dx + dy * dy + dz * dz) < radius;
-          });
-
-          setTimeout(() => {
-            setOrbState((prev) => ({ ...prev, mode: OrbMode.IDLE }));
-          }, 2000);
-
-          return {
-            entitiesFound: nearbyEntities.length,
-            entities: nearbyEntities.map((e) => ({
-              id: e.id,
-              name: e.name,
-              position: e.position,
-            })),
-          };
         }
 
         case 'modifyEntity': {
@@ -360,6 +643,138 @@ function App() {
           const operation = args.operation as string;
           addLog(logSystem(`System operation: ${operation}`, 'devops'));
           return { success: true, operation };
+        }
+
+        case 'placeBlocks': {
+          const blocks = args.blocks as BlockData[];
+          if (engineRef.current) {
+            engineRef.current.placeBlocks(blocks);
+          }
+          addLog(logInfo(`Placed ${blocks.length} blocks via AI`, 'orb'));
+          return { success: true, count: blocks.length };
+        }
+
+        case 'placeBlocksAbsolute': {
+          const blocks = args.blocks as BlockData[];
+          if (engineRef.current) {
+            engineRef.current.placeBlocksAbsolute(blocks);
+          }
+          addLog(logInfo(`Placed ${blocks.length} blocks at absolute coords`, 'orb'));
+          return { success: true, count: blocks.length };
+        }
+
+        case 'removeBlocks': {
+          const positions = args.positions as Vector3[];
+          let removed = 0;
+          positions.forEach(pos => {
+            if (engineRef.current?.removeBlockAt(pos.x, pos.y, pos.z)) removed++;
+          });
+          addLog(logInfo(`Removed ${removed} blocks`, 'orb'));
+          return { success: true, removed };
+        }
+
+        case 'clearArea': {
+          const start = args.start as Vector3;
+          const end = args.end as Vector3;
+          const cleared = engineRef.current?.clearArea(start, end) || 0;
+          addLog(logInfo(`Cleared ${cleared} blocks from area`, 'orb'));
+          return { success: true, cleared };
+        }
+
+        case 'getBlockAt': {
+          const blockType = engineRef.current?.getBlockAt(
+            args.x as number,
+            args.y as number,
+            args.z as number
+          );
+          return { success: true, blockType, empty: blockType === null };
+        }
+
+        case 'getBlocksInArea': {
+          const center = { x: args.centerX as number, y: args.centerY as number, z: args.centerZ as number };
+          const radius = Math.min(args.radius as number, 10); // Cap at 10 to prevent performance issues
+          const blocks = engineRef.current?.getBlocksInArea(center, radius) || [];
+          return { success: true, blocks, count: blocks.length };
+        }
+
+        // ========== AUTONOMY CONTROL ==========
+        case 'setOrbAutonomy': {
+          const enabled = args.enabled as boolean;
+          if (orbBrainRef.current) {
+            orbBrainRef.current.setAutonomy(enabled);
+            addLog(logInfo(`Orb autonomy ${enabled ? 'enabled' : 'disabled'}`, 'ai'));
+          }
+          return { success: true, autonomyEnabled: enabled };
+        }
+
+        case 'addOrbGoal': {
+          const goalType = args.type as string;
+          const priority = (args.priority as number) || 5;
+          const description = args.description as string;
+          const targetPosition = args.targetPosition as Vector3 | undefined;
+
+          const typeMap: Record<string, AIGoalType> = {
+            'follow_player': AIGoalType.FOLLOW_PLAYER,
+            'explore': AIGoalType.EXPLORE,
+            'build': AIGoalType.BUILD,
+            'gather': AIGoalType.GATHER,
+            'observe': AIGoalType.OBSERVE,
+            'idle': AIGoalType.IDLE,
+            'investigate': AIGoalType.INVESTIGATE,
+          };
+
+          const aiGoalType = typeMap[goalType] || AIGoalType.IDLE;
+
+          if (orbBrainRef.current) {
+            const goal = orbBrainRef.current.addGoal({
+              type: aiGoalType,
+              priority,
+              description,
+              targetPosition,
+            });
+            addLog(logInfo(`Added goal: ${description || goalType}`, 'ai'));
+            return { success: true, goalId: goal.id };
+          }
+          return { success: false, error: 'OrbBrain not initialized' };
+        }
+
+        case 'removeOrbGoal': {
+          const goalId = args.goalId as string;
+          if (orbBrainRef.current) {
+            orbBrainRef.current.removeGoal(goalId);
+            addLog(logInfo(`Removed goal: ${goalId}`, 'ai'));
+            return { success: true };
+          }
+          return { success: false, error: 'OrbBrain not initialized' };
+        }
+
+        case 'clearOrbGoals': {
+          if (orbBrainRef.current) {
+            orbBrainRef.current.clearGoals();
+            addLog(logInfo('Cleared all Orb goals', 'ai'));
+            return { success: true };
+          }
+          return { success: false, error: 'OrbBrain not initialized' };
+        }
+
+        case 'getOrbState': {
+          if (orbBrainRef.current) {
+            const state = orbBrainRef.current.getState();
+            return {
+              success: true,
+              position: state.position,
+              mode: state.mode,
+              autonomyEnabled: state.autonomyEnabled,
+              activeGoal: state.activeGoal ? {
+                type: state.activeGoal.type,
+                description: state.activeGoal.description,
+                progress: state.activeGoal.progress,
+              } : null,
+              goalsCount: state.goals.length,
+              isMoving: state.isMoving,
+            };
+          }
+          return { success: false, error: 'OrbBrain not initialized' };
         }
 
         default:
@@ -555,7 +970,40 @@ function App() {
       setOrbState((prev) => ({ ...prev, mode: OrbMode.THINKING }));
 
       try {
-        const result = await chatWithTools(message, chatHistory);
+        // Build spatial context for vibe-coding
+        const playerPos = engineRef.current?.getPlayerPosition() || { x: 0, y: 0, z: 0 };
+        const lookDir = engineRef.current?.getLookDirection() || { x: 0, y: 0, z: -1 };
+        const raycast = engineRef.current?.raycast(50); // 50 block range for vibe-coding
+
+        // Get nearby blocks for environmental awareness (radius 5)
+        const nearbyBlocks = engineRef.current?.getBlocksInArea(
+          { x: Math.floor(playerPos.x), y: Math.floor(playerPos.y), z: Math.floor(playerPos.z) },
+          5
+        ) || [];
+
+        // Summarize nearby blocks by type
+        const blockCounts: Record<number, number> = {};
+        nearbyBlocks.forEach(b => { blockCounts[b.type] = (blockCounts[b.type] || 0) + 1; });
+        const blockTypeNames: Record<number, string> = { 1: 'Grass', 2: 'Dirt', 3: 'Stone', 4: 'Wood', 5: 'Leaf', 6: 'Plank' };
+        const nearbyDescription = Object.entries(blockCounts)
+          .map(([type, count]) => `${blockTypeNames[+type] || 'Unknown'}: ${count}`)
+          .join(', ');
+
+        const spatialContext = `[SPATIAL CONTEXT]
+Player Position: (${playerPos.x}, ${playerPos.y}, ${playerPos.z})
+Look Direction: (${lookDir.x.toFixed(2)}, ${lookDir.y.toFixed(2)}, ${lookDir.z.toFixed(2)})
+${raycast?.hit
+  ? `Looking At: Block at (${raycast.blockPosition.x}, ${raycast.blockPosition.y}, ${raycast.blockPosition.z})${raycast.isGround ? ' [ground]' : ''}, distance ${raycast.distance.toFixed(1)} blocks`
+  : 'Looking At: Nothing (sky)'}
+Nearby Blocks (radius 5): ${nearbyDescription || 'None'}
+
+When the user says "here", "this spot", or "where I'm looking", use the block position above.
+When placing blocks, use ABSOLUTE world coordinates via placeBlocksAbsolute tool.
+Block types: 1=Grass, 2=Dirt, 3=Stone, 4=Wood, 5=Leaf, 6=Plank
+`;
+
+        const enrichedMessage = spatialContext + '\n\nUser command: ' + message;
+        const result = await chatWithTools(enrichedMessage, chatHistory);
 
         // Execute any function calls
         for (const call of result.functionCalls) {
@@ -668,6 +1116,7 @@ function App() {
         onBlockPlace={handleBlockPlace}
         orbState={orbState}
         entities={worldState.entities}
+        onOrbPositionUpdate={handleOrbPositionUpdate}
       />
 
       {/* UI Overlay */}

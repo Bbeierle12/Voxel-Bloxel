@@ -40,6 +40,7 @@ export enum ItemType {
   WATER = 8,
   SAND = 9,
   SNOW = 10,
+  SAPLING = 11,
   STICK = 100,
   WOODEN_PICKAXE = 101,
   WOODEN_SWORD = 102,
@@ -117,6 +118,7 @@ export enum OrbMode {
   SCANNING = 'scanning',
   LISTENING = 'listening',
   SPEAKING = 'speaking',
+  FOLLOWING = 'following',
 }
 
 export interface OrbState {
@@ -135,6 +137,166 @@ export const createDefaultOrbState = (): OrbState => ({
   thinkingProgress: 0,
   scanRadius: 20,
   scanConeAngle: 45,
+});
+
+// ============================================================================
+// AUTONOMOUS AI ORB SYSTEM
+// ============================================================================
+
+/** AI Goal types */
+export enum AIGoalType {
+  FOLLOW_PLAYER = 'follow_player',
+  EXPLORE = 'explore',
+  BUILD = 'build',
+  GATHER = 'gather',
+  OBSERVE = 'observe',
+  IDLE = 'idle',
+  INVESTIGATE = 'investigate',
+}
+
+/** Orb mood affects behavior tendencies */
+export type OrbMood = 'curious' | 'helpful' | 'playful' | 'contemplative';
+
+/** What the Orb perceives in the world */
+export interface OrbPerceptionData {
+  nearbyBlocks: Array<{ position: Vector3; type: number; distance: number }>;
+  nearbyEntities: Array<{ id: string; name: string; type: EntityType; position: Vector3; distance: number }>;
+  playerPosition: Vector3;
+  playerDistance: number;
+  playerVisible: boolean;
+  playerLookDirection: Vector3;
+  terrainFeatures: Array<{ type: string; position: Vector3; description: string }>;
+  timeOfDay: number;
+  lastUpdated: number;
+}
+
+/** AI Goal with priority and lifecycle */
+export interface AIGoal {
+  id: string;
+  type: AIGoalType;
+  priority: number; // 0-10, higher = more important
+  description: string;
+  targetPosition?: Vector3;
+  targetEntityId?: string;
+  targetBlocks?: BlockData[];
+  progress: number; // 0-1
+  status: 'pending' | 'active' | 'completed' | 'failed' | 'suspended';
+  createdAt: number;
+  expiresAt?: number;
+  metadata: Record<string, unknown>;
+}
+
+/** Orb's persistent memory */
+export interface OrbMemory {
+  visitedLocations: Map<string, { count: number; lastVisit: number }>;
+  playerInteractions: Array<{ timestamp: number; type: string; content: string }>;
+  learnedPatterns: Array<{ trigger: string; response: string; confidence: number }>;
+  curiosityLevel: number; // 0-1
+  energyLevel: number; // 0-1
+  mood: OrbMood;
+}
+
+/** Pathfinding node for A* algorithm */
+export interface PathNode {
+  position: Vector3;
+  g: number; // Cost from start
+  h: number; // Heuristic to end
+  f: number; // g + h
+  parent?: PathNode;
+}
+
+/** Autonomous Orb State - extends basic OrbState with autonomy features */
+export interface AutonomousOrbState extends OrbState {
+  // Autonomy control
+  autonomyEnabled: boolean;
+
+  // Perception
+  perception: OrbPerceptionData;
+
+  // Goals
+  goals: AIGoal[];
+  activeGoal?: AIGoal;
+
+  // Movement / Pathfinding
+  path: Vector3[];
+  pathIndex: number;
+  isMoving: boolean;
+  movementSpeed: number;
+
+  // Memory & Learning
+  memory: OrbMemory;
+
+  // Timing
+  lastDecisionTime: number;
+  lastPerceptionTime: number;
+  behaviorTickRate: number; // ms between AI ticks
+
+  // Communication
+  pendingUtterance?: string;
+  lastSpokenTime: number;
+}
+
+/** World context passed to AI brain for decision making */
+export interface WorldContext {
+  entities: Entity[];
+  playerPosition: Vector3;
+  playerLookDirection: Vector3;
+  timeOfDay: number;
+  physics: WorldPhysics;
+  hasBlockAt: (x: number, y: number, z: number) => boolean;
+  getBlocksInArea: (center: Vector3, radius: number) => Array<{ position: Vector3; type: number }>;
+}
+
+/** Action types the AI can take */
+export type AIAction =
+  | { type: 'move'; target: Vector3; speed?: number }
+  | { type: 'build'; blocks: BlockData[] }
+  | { type: 'speak'; message: string }
+  | { type: 'observe'; target: Vector3 | string }
+  | { type: 'wait'; duration: number }
+  | { type: 'setGoal'; goal: Partial<AIGoal> }
+  | { type: 'none' };
+
+/** Create default perception data */
+export const createDefaultPerception = (): OrbPerceptionData => ({
+  nearbyBlocks: [],
+  nearbyEntities: [],
+  playerPosition: { x: 0, y: 0, z: 0 },
+  playerDistance: 0,
+  playerVisible: false,
+  playerLookDirection: { x: 0, y: 0, z: -1 },
+  terrainFeatures: [],
+  timeOfDay: 0.25,
+  lastUpdated: 0,
+});
+
+/** Create default memory */
+export const createDefaultMemory = (): OrbMemory => ({
+  visitedLocations: new Map(),
+  playerInteractions: [],
+  learnedPatterns: [],
+  curiosityLevel: 0.7,
+  energyLevel: 1.0,
+  mood: 'curious',
+});
+
+/** Create default autonomous orb state */
+export const createDefaultAutonomousOrbState = (): AutonomousOrbState => ({
+  ...createDefaultOrbState(),
+  autonomyEnabled: true,
+  perception: createDefaultPerception(),
+  goals: [],
+  activeGoal: undefined,
+  path: [],
+  pathIndex: 0,
+  isMoving: false,
+  movementSpeed: 5,
+  memory: createDefaultMemory(),
+  lastDecisionTime: 0,
+  lastPerceptionTime: 0,
+  behaviorTickRate: 500, // 500ms between AI decisions
+  pendingUtterance: undefined,
+  lastSpokenTime: 0,
 });
 
 // ============================================================================
@@ -401,12 +563,33 @@ export const AI_TOOLS: ToolDefinition[] = [
 // GAME ENGINE INTERFACE
 // ============================================================================
 
+export interface RaycastResult {
+  hit: boolean;
+  point: Vector3;           // World position of hit
+  blockPosition: Vector3;   // Integer block coords
+  normal: Vector3;          // Surface normal
+  distance: number;
+  isGround: boolean;
+}
+
 export interface GameEngineRef {
-  placeBlocks: (blocks: BlockData[]) => void;
+  // Existing methods
+  placeBlocks: (blocks: BlockData[]) => void;  // Relative to player (5 units forward)
   getPlayerPosition: () => Vector3;
   getOrbPosition: () => Vector3;
   moveOrb: (x: number, y: number, z: number) => void;
   requestLock: () => void;
+
+  // NEW: Spatial context
+  getLookDirection: () => Vector3;
+  raycast: (maxDistance?: number) => RaycastResult | null;  // Screen center raycast
+
+  // NEW: Block operations
+  placeBlocksAbsolute: (blocks: BlockData[]) => void;  // Absolute world coords
+  removeBlockAt: (x: number, y: number, z: number) => boolean;
+  getBlockAt: (x: number, y: number, z: number) => number | null;
+  getBlocksInArea: (center: Vector3, radius: number) => Array<{ position: Vector3; type: number }>;
+  clearArea: (start: Vector3, end: Vector3) => number;
 }
 
 // ============================================================================
