@@ -485,99 +485,74 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
             clouds.push(cloud);
         }
 
-        // --- Terrain Gen (Async Chunked Loading) ---
-        const WORLD_SIZE = 120; // Reduced for faster loading
-        const offset = WORLD_SIZE / 2;
-        const CHUNK_SIZE = 16; // Process in 16x16 chunks
-        console.log('Starting terrain generation...');
+        // --- Large Flat Ground Plane ---
+        const WORLD_SIZE = 1000; // Much larger world
+        const GROUND_Y = 0; // Ground level
 
-        const createTree = (tx: number, ty: number, tz: number) => {
+        // Create grass-textured ground plane
+        const groundGeometry = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, 1, 1);
+        groundGeometry.rotateX(-Math.PI / 2); // Lay flat
+
+        // Create a tiling grass texture
+        const groundTexture = textures.grass.clone();
+        groundTexture.wrapS = THREE.RepeatWrapping;
+        groundTexture.wrapT = THREE.RepeatWrapping;
+        groundTexture.repeat.set(WORLD_SIZE / 4, WORLD_SIZE / 4); // Tile every 4 units
+
+        const groundMaterial = new THREE.MeshStandardMaterial({
+            map: groundTexture,
+            roughness: 0.9,
+            metalness: 0.0
+        });
+
+        const groundMesh = new THREE.Mesh(groundGeometry, groundMaterial);
+        groundMesh.position.y = GROUND_Y;
+        groundMesh.receiveShadow = true;
+        scene.add(groundMesh);
+
+        // Store ground ref for raycasting
+        const groundMeshRef = groundMesh;
+
+        console.log(`Created ground plane: ${WORLD_SIZE}x${WORLD_SIZE} at y=${GROUND_Y}`);
+
+        // --- Tree Generation ---
+        const createTree = (tx: number, tz: number) => {
+            const ty = GROUND_Y + 1; // Trees start 1 unit above ground
             // Trunk
-            for(let i=0; i<4; i++) {
-                addBlock(tx, ty+i, tz, 3, true); // Wood (Index 3)
+            for (let i = 0; i < 4; i++) {
+                addBlock(tx, ty + i, tz, 3, true); // Wood (Index 3)
             }
             // Leaves
-            for(let lx=-2; lx<=2; lx++){
-                for(let lz=-2; lz<=2; lz++){
-                    for(let ly=2; ly<=4; ly++){
-                         if(Math.abs(lx)+Math.abs(lz)+Math.abs(ly-3) < 4){
-                             if(!(lx===0 && lz===0 && ly<4)){
-                                 addBlock(tx+lx, ty+ly, tz+lz, 4, true); // Leaf (Index 4)
-                             }
-                         }
-                    }
-                }
-            }
-        };
-
-        // Generate terrain in chunks to prevent browser freeze
-        const generateChunk = (chunkX: number, chunkZ: number) => {
-            const startX = chunkX * CHUNK_SIZE - offset;
-            const startZ = chunkZ * CHUNK_SIZE - offset;
-            const endX = Math.min(startX + CHUNK_SIZE, offset);
-            const endZ = Math.min(startZ + CHUNK_SIZE, offset);
-
-            for (let x = startX; x < endX; x++) {
-                for (let z = startZ; z < endZ; z++) {
-                    let height = 0;
-                    let isFlat = false;
-
-                    // Central Flat Zone: -20 to 20
-                    if (x > -20 && x < 20 && z > -20 && z < 20) {
-                         height = 0;
-                         isFlat = true;
-                    } else {
-                         const h1 = Math.sin(x * 0.1) * Math.cos(z * 0.1) * 3;
-                         const h2 = Math.sin(x * 0.3) * Math.sin(z * 0.3) * 1;
-                         height = Math.floor(h1 + h2);
-                    }
-
-                    // Bedrock/Base
-                    addBlock(x, -5, z, 2, true); 
-
-                    for (let y = -4; y <= height; y++) {
-                        let typeIdx = 2; // Stone
-                        if (y === height) typeIdx = 0; // Grass
-                        else if (y > height - 3) typeIdx = 1; // Dirt
-                        addBlock(x, y, z, typeIdx, true);
-                    }
-
-                    // Trees only outside flat zone
-                    if (!isFlat) {
-                         if (x > -offset + 2 && x < offset - 2 && z > -offset + 2 && z < offset - 2) {
-                            // 1% chance for a tree
-                            if (Math.random() < 0.01 && height > 0) {
-                                createTree(x, height + 1, z);
+            for (let lx = -2; lx <= 2; lx++) {
+                for (let lz = -2; lz <= 2; lz++) {
+                    for (let ly = 2; ly <= 4; ly++) {
+                        if (Math.abs(lx) + Math.abs(lz) + Math.abs(ly - 3) < 4) {
+                            if (!(lx === 0 && lz === 0 && ly < 4)) {
+                                addBlock(tx + lx, ty + ly, tz + lz, 4, true); // Leaf (Index 4)
                             }
-                         }
+                        }
                     }
                 }
             }
         };
 
-        // Load chunks asynchronously
-        const chunksPerAxis = Math.ceil(WORLD_SIZE / CHUNK_SIZE);
-        let chunkIndex = 0;
-        const totalChunks = chunksPerAxis * chunksPerAxis;
+        // Scatter trees across the world (avoiding center spawn area)
+        const TREE_COUNT = 200;
+        const SPAWN_CLEAR_ZONE = 30; // No trees within 30 units of spawn
 
-        const loadNextChunks = () => {
-            const chunksPerFrame = 4; // Load 4 chunks per frame for balance
-            for (let i = 0; i < chunksPerFrame && chunkIndex < totalChunks; i++) {
-                const chunkX = chunkIndex % chunksPerAxis;
-                const chunkZ = Math.floor(chunkIndex / chunksPerAxis);
-                generateChunk(chunkX, chunkZ);
-                chunkIndex++;
+        console.log('Generating trees...');
+        for (let i = 0; i < TREE_COUNT; i++) {
+            const tx = Math.floor((Math.random() - 0.5) * (WORLD_SIZE - 20));
+            const tz = Math.floor((Math.random() - 0.5) * (WORLD_SIZE - 20));
+
+            // Skip if too close to spawn
+            if (Math.abs(tx) < SPAWN_CLEAR_ZONE && Math.abs(tz) < SPAWN_CLEAR_ZONE) {
+                continue;
             }
 
-            if (chunkIndex < totalChunks) {
-                setTimeout(loadNextChunks, 0); // Yield to browser
-            } else {
-                console.log('Terrain generation complete. Block count:', Object.keys(chunksRef.current).length);
-            }
-        };
-
-        // Start async loading
-        loadNextChunks();
+            createTree(tx, tz);
+        }
+        console.log('Tree generation complete. Block count:', blockDataRef.current.size);
 
         // --- Event Listeners ---
         const handleResize = () => {
