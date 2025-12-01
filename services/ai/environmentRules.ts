@@ -22,6 +22,7 @@ export interface WorldPerception {
   woodBlocks: Array<{ position: Vector3; type: number }>;
   waterBlocks: Array<{ position: Vector3; type: number }>;
   saplingBlocks: Array<{ position: Vector3; type: number }>;
+  fireBlocks: Array<{ position: Vector3; type: number }>;
   allBlocks: Array<{ position: Vector3; type: number }>;
   timeOfDay: number; // 0-1, for day/night effects
   timestamp: number;
@@ -66,6 +67,7 @@ export interface EnvironmentRules {
   leafDecay: (perception: WorldPerception, getBlockAt: GetBlockAt) => BlockChange[];
   treeGrowth: (perception: WorldPerception, getBlockAt: GetBlockAt) => BlockChange[];
   waterFlow: (perception: WorldPerception, getBlockAt: GetBlockAt) => BlockChange[];
+  fireSpread: (perception: WorldPerception, getBlockAt: GetBlockAt) => BlockChange[];
 }
 
 /**
@@ -350,10 +352,151 @@ function generateTree(x: number, y: number, z: number): Array<{ position: Vector
  * WATER FLOW RULE (Phase 3)
  *
  * Water spreads horizontally and flows downward.
+ * - Water falls down if there's air below
+ * - Water spreads horizontally to adjacent air blocks (with limit)
+ * - Creates natural water pooling behavior
  */
 function waterFlow(perception: WorldPerception, getBlockAt: GetBlockAt): BlockChange[] {
-  // TODO: Implement in Phase 3
-  return [];
+  const changes: BlockChange[] = [];
+  const FLOW_CHANCE = 0.25; // 25% chance per water block per tick
+  const MAX_SPREAD = 4; // Max horizontal spread from source
+
+  // Track positions we're already changing to avoid duplicates
+  const pendingPositions = new Set<string>();
+
+  for (const water of perception.waterBlocks) {
+    const pos = water.position;
+
+    // Random chance to flow this tick
+    if (Math.random() > FLOW_CHANCE) continue;
+
+    // Priority 1: Flow downward
+    const below = getBlockAt(pos.x, pos.y - 1, pos.z);
+    if (below === null || below === ItemType.AIR) {
+      const key = `${pos.x},${pos.y - 1},${pos.z}`;
+      if (!pendingPositions.has(key)) {
+        pendingPositions.add(key);
+        changes.push({
+          position: { x: pos.x, y: pos.y - 1, z: pos.z },
+          action: 'place',
+          newType: ItemType.WATER,
+          rule: 'water_flow',
+        });
+      }
+      continue; // Flowing down takes priority
+    }
+
+    // Priority 2: Spread horizontally (only if can't flow down)
+    // Only spread if sitting on a solid block
+    if (below !== null && below !== ItemType.AIR && below !== ItemType.WATER) {
+      for (const dir of HORIZONTAL_DIRS.slice(0, 4)) { // Only cardinal directions
+        const nx = pos.x + dir.x;
+        const nz = pos.z + dir.z;
+        const neighbor = getBlockAt(nx, pos.y, nz);
+
+        if (neighbor === null || neighbor === ItemType.AIR) {
+          const key = `${nx},${pos.y},${nz}`;
+          if (!pendingPositions.has(key)) {
+            pendingPositions.add(key);
+            changes.push({
+              position: { x: nx, y: pos.y, z: nz },
+              action: 'place',
+              newType: ItemType.WATER,
+              rule: 'water_flow',
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return changes;
+}
+
+/**
+ * FIRE SPREAD RULE (Phase 3)
+ *
+ * Fire spreads to adjacent flammable blocks (wood, leaf, plank).
+ * Fire burns out over time.
+ * Water extinguishes fire.
+ */
+function fireSpread(perception: WorldPerception, getBlockAt: GetBlockAt): BlockChange[] {
+  const changes: BlockChange[] = [];
+  const SPREAD_CHANCE = 0.15; // 15% chance to spread per adjacent flammable block
+  const BURNOUT_CHANCE = 0.08; // 8% chance for fire to burn out per tick
+
+  // Flammable block types
+  const FLAMMABLE = new Set([ItemType.WOOD, ItemType.LEAF, ItemType.PLANK, ItemType.SAPLING]);
+
+  // Track positions we're already changing
+  const pendingPositions = new Set<string>();
+
+  for (const fire of perception.fireBlocks) {
+    const pos = fire.position;
+
+    // Check if fire is touching water - extinguish immediately
+    let touchingWater = false;
+    for (const dir of ADJACENT_DIRS) {
+      const neighbor = getBlockAt(pos.x + dir.x, pos.y + dir.y, pos.z + dir.z);
+      if (neighbor === ItemType.WATER) {
+        touchingWater = true;
+        break;
+      }
+    }
+
+    if (touchingWater) {
+      changes.push({
+        position: { ...pos },
+        action: 'remove',
+        oldType: ItemType.FIRE,
+        rule: 'fire_spread',
+      });
+      continue;
+    }
+
+    // Check for burnout
+    if (Math.random() < BURNOUT_CHANCE) {
+      changes.push({
+        position: { ...pos },
+        action: 'remove',
+        oldType: ItemType.FIRE,
+        rule: 'fire_spread',
+      });
+      continue;
+    }
+
+    // Try to spread to adjacent flammable blocks
+    for (const dir of ADJACENT_DIRS) {
+      const nx = pos.x + dir.x;
+      const ny = pos.y + dir.y;
+      const nz = pos.z + dir.z;
+      const neighbor = getBlockAt(nx, ny, nz);
+
+      if (neighbor !== null && FLAMMABLE.has(neighbor)) {
+        if (Math.random() < SPREAD_CHANCE) {
+          const key = `${nx},${ny},${nz}`;
+          if (!pendingPositions.has(key)) {
+            pendingPositions.add(key);
+            // Remove the flammable block and replace with fire
+            changes.push({
+              position: { x: nx, y: ny, z: nz },
+              action: 'remove',
+              oldType: neighbor,
+              rule: 'fire_spread',
+            });
+            changes.push({
+              position: { x: nx, y: ny, z: nz },
+              action: 'place',
+              newType: ItemType.FIRE,
+              rule: 'fire_spread',
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return changes;
 }
 
 /**
@@ -365,5 +508,6 @@ export function createEnvironmentRules(): EnvironmentRules {
     leafDecay,
     treeGrowth,
     waterFlow,
+    fireSpread,
   };
 }

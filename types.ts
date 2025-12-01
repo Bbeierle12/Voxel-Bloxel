@@ -41,6 +41,7 @@ export enum ItemType {
   SAND = 9,
   SNOW = 10,
   SAPLING = 11,
+  FIRE = 12,
   STICK = 100,
   WOODEN_PICKAXE = 101,
   WOODEN_SWORD = 102,

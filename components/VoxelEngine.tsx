@@ -50,7 +50,8 @@ const textures = {
     water: createTexture('#3498db', 5),
     sand: createTexture('#f4d03f', 15),
     snow: createTexture('#ecf0f1', 5),
-    sapling: createTexture('#3d8c40', 15)
+    sapling: createTexture('#3d8c40', 15),
+    fire: createTexture('#ff4500', 30) // Orange-red fire
 };
 
 // Use MeshStandardMaterial for better WebGPU support and PBR lighting
@@ -65,7 +66,8 @@ const materials = {
     water: new THREE.MeshStandardMaterial({ map: textures.water, transparent: true, opacity: 0.7 }),
     sand: new THREE.MeshStandardMaterial({ map: textures.sand }),
     snow: new THREE.MeshStandardMaterial({ map: textures.snow }),
-    sapling: new THREE.MeshStandardMaterial({ map: textures.sapling, transparent: true, opacity: 0.95 })
+    sapling: new THREE.MeshStandardMaterial({ map: textures.sapling, transparent: true, opacity: 0.95 }),
+    fire: new THREE.MeshStandardMaterial({ map: textures.fire, emissive: 0xff4500, emissiveIntensity: 0.8, transparent: true, opacity: 0.9 })
 };
 
 // Map Index to ItemType. Array Index 0 = ItemType 1.
@@ -81,6 +83,7 @@ const BLOCK_TYPES = [
     { id: ItemType.SAND, name: 'Sand', mat: materials.sand },           // Index 8, ItemType 9
     { id: ItemType.SNOW, name: 'Snow', mat: materials.snow },           // Index 9, ItemType 10
     { id: ItemType.SAPLING, name: 'Sapling', mat: materials.sapling },  // Index 10, ItemType 11
+    { id: ItemType.FIRE, name: 'Fire', mat: materials.fire },           // Index 11, ItemType 12
 ];
 
 interface VoxelEngineProps {
@@ -89,13 +92,13 @@ interface VoxelEngineProps {
     onBlockBreak: (type: ItemType) => void;
     checkCanPlace: (type: ItemType) => boolean;
     onBlockPlace: (type: ItemType) => void;
-    selectedBlockIndex: number; // Maps to BLOCK_TYPES index
+    selectedItemType: ItemType; // The ItemType to place when player clicks
     orbState?: OrbState | AutonomousOrbState;
     entities?: Entity[];
     onOrbPositionUpdate?: (position: Vector3) => void; // Callback for autonomous movement
 }
 
-const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedBlockIndex, orbState, entities = [], onOrbPositionUpdate }, ref) => {
+const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate, onLockChange, onBlockBreak, checkCanPlace, onBlockPlace, selectedItemType, orbState, entities = [], onOrbPositionUpdate }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -142,20 +145,20 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
     // frameIdRef is no longer needed with setAnimationLoop
     const boxGeometryRef = useRef(new THREE.BoxGeometry(1, 1, 1));
     const groundMeshRef = useRef<THREE.Mesh | null>(null);
-    const selectedBlockRef = useRef(selectedBlockIndex); 
+    const selectedItemTypeRef = useRef<ItemType>(selectedItemType);
     const checkCanPlaceRef = useRef(checkCanPlace);
     const onBlockPlaceRef = useRef(onBlockPlace);
     const onBlockBreakRef = useRef(onBlockBreak);
 
     // Sync prop changes
     useEffect(() => {
-        selectedBlockRef.current = selectedBlockIndex;
+        selectedItemTypeRef.current = selectedItemType;
         checkCanPlaceRef.current = checkCanPlace;
         onBlockPlaceRef.current = onBlockPlace;
         onBlockBreakRef.current = onBlockBreak;
         orbStateRef.current = orbState;
         onOrbPositionUpdateRef.current = onOrbPositionUpdate;
-    }, [selectedBlockIndex, checkCanPlace, onBlockPlace, onBlockBreak, orbState, onOrbPositionUpdate]);
+    }, [selectedItemType, checkCanPlace, onBlockPlace, onBlockBreak, orbState, onOrbPositionUpdate]);
 
     const getKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
@@ -761,7 +764,11 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
 
                         if (overlap) return;
 
-                        addBlock(nx, ny, nz, selectedBlockRef.current, false);
+                        // Convert ItemType to BLOCK_TYPES array index
+                        const typeIndex = BLOCK_TYPES.findIndex(bt => bt.id === selectedItemTypeRef.current);
+                        if (typeIndex !== -1) {
+                            addBlock(nx, ny, nz, typeIndex, false);
+                        }
                     }
                 } else {
                     // Hit an instanced mesh (block)
@@ -814,7 +821,11 @@ const VoxelEngine = forwardRef<GameEngineRef, VoxelEngineProps>(({ onStatsUpdate
 
                         if (overlap) return;
 
-                        addBlock(nx, ny, nz, selectedBlockRef.current, false);
+                        // Convert ItemType to BLOCK_TYPES array index
+                        const typeIndex = BLOCK_TYPES.findIndex(bt => bt.id === selectedItemTypeRef.current);
+                        if (typeIndex !== -1) {
+                            addBlock(nx, ny, nz, typeIndex, false);
+                        }
                     }
                 }
             }

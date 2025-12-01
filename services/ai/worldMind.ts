@@ -17,6 +17,7 @@ import {
   WorldPerception,
   createEnvironmentRules
 } from './environmentRules';
+import { WorldAI, WorldAIDecision, createWorldAI } from './worldAI';
 
 // Configuration for the WorldMind
 export interface WorldMindConfig {
@@ -30,6 +31,9 @@ export interface WorldMindConfig {
     waterFlow: boolean;
     fireSpread: boolean;
   };
+  // Local AI settings (no API key needed!)
+  useLocalModel: boolean;        // Whether to use local AI model (default: true)
+  modelId?: string;              // Hugging Face model ID (default: Qwen/Qwen2.5-0.5B-Instruct)
 }
 
 // What the world remembers
@@ -55,7 +59,8 @@ export interface WorldMindCallbacks {
 
 // Events the world can emit
 export interface WorldEvent {
-  type: 'grass_spread' | 'leaf_decay' | 'tree_grow' | 'sapling_drop' | 'water_flow' | 'fire_spread';
+  type: 'grass_spread' | 'leaf_decay' | 'tree_grow' | 'sapling_drop' | 'water_flow' | 'fire_spread'
+      | 'ai_water_spring' | 'ai_lightning' | 'ai_plant_seeds' | 'ai_erosion';
   position: Vector3;
   message?: string;
 }
@@ -73,26 +78,42 @@ export interface WorldMindState {
 const DEFAULT_CONFIG: WorldMindConfig = {
   tickRate: 1000,
   perceptionRadius: 32,
-  maxChangesPerTick: 20,
+  maxChangesPerTick: 25,
   rules: {
     grassSpread: true,
     leafDecay: true,
-    treeGrowth: true,   // Saplings grow into trees
-    waterFlow: false,   // Phase 3
-    fireSpread: false,  // Phase 3
+    treeGrowth: true,
+    waterFlow: true,    // Water flows and spreads
+    fireSpread: true,   // Fire spreads and burns out
   },
+  // Local AI settings - no API key needed!
+  useLocalModel: true,
+  modelId: 'Qwen/Qwen2.5-0.5B-Instruct',
 };
 
 export class WorldMind {
   private state: WorldMindState;
   private callbacks: WorldMindCallbacks;
   private rules: EnvironmentRules;
+  private worldAI: WorldAI;
   private tickInterval: ReturnType<typeof setInterval> | null = null;
   private isProcessing = false;
 
   constructor(callbacks: WorldMindCallbacks, config: Partial<WorldMindConfig> = {}) {
     this.callbacks = callbacks;
     this.rules = createEnvironmentRules();
+
+    // Merge config with defaults
+    const fullConfig = { ...DEFAULT_CONFIG, ...config };
+
+    // Create WorldAI with local model configuration (no API key needed!)
+    this.worldAI = createWorldAI({
+      enabled: true,
+      thinkInterval: 8000,  // AI thinks every 8 seconds
+      creativityLevel: 0.25, // 25% chance of creative events
+      useLocalModel: fullConfig.useLocalModel,
+      modelId: fullConfig.modelId || 'Qwen/Qwen2.5-0.5B-Instruct',
+    });
 
     this.state = {
       isActive: false,
@@ -107,8 +128,15 @@ export class WorldMind {
         tickCount: 0,
       },
       pendingChanges: [],
-      config: { ...DEFAULT_CONFIG, ...config },
+      config: fullConfig,
     };
+  }
+
+  /**
+   * Get WorldAI instance for direct access
+   */
+  getWorldAI(): WorldAI {
+    return this.worldAI;
   }
 
   /**
@@ -168,7 +196,7 @@ export class WorldMind {
 
     try {
       const now = Date.now();
-      this.state.tickCount++;
+      this.state.memory.tickCount++;
 
       // 1. PERCEIVE - What does the world see?
       const perception = this.perceive();
@@ -217,6 +245,7 @@ export class WorldMind {
     const woodBlocks = blocksByType.get(ItemType.WOOD) || [];
     const waterBlocks = blocksByType.get(ItemType.WATER) || [];
     const saplingBlocks = blocksByType.get(ItemType.SAPLING) || [];
+    const fireBlocks = blocksByType.get(ItemType.FIRE) || [];
 
     // Get time of day for day/night effects
     const timeOfDay = this.callbacks.getTimeOfDay?.() ?? 0.5;
@@ -231,6 +260,7 @@ export class WorldMind {
       woodBlocks,
       waterBlocks,
       saplingBlocks,
+      fireBlocks,
       allBlocks: blocks,
       timeOfDay,
       timestamp: Date.now(),
@@ -271,13 +301,127 @@ export class WorldMind {
       changes.push(...growthChanges);
     }
 
-    // TODO Phase 3: Water flow, fire spread
+    // Apply water flow rule
+    if (config.rules.waterFlow) {
+      const waterChanges = this.rules.waterFlow(
+        perception,
+        (x, y, z) => this.callbacks.getBlockAt(x, y, z)
+      );
+      changes.push(...waterChanges);
+    }
+
+    // Apply fire spread rule
+    if (config.rules.fireSpread) {
+      const fireChanges = this.rules.fireSpread(
+        perception,
+        (x, y, z) => this.callbacks.getBlockAt(x, y, z)
+      );
+      changes.push(...fireChanges);
+    }
+
+    // AI-driven world events (Gemma integration point)
+    if (this.worldAI.shouldThink()) {
+      const aiDecision = this.worldAI.think(perception);
+      const aiChanges = this.executeAIDecision(aiDecision, perception);
+      changes.push(...aiChanges);
+
+      // Log AI decisions (for debugging/visibility)
+      if (aiDecision.event !== 'nothing' && aiDecision.reason) {
+        console.log(`[WorldMind AI] ${aiDecision.event}: ${aiDecision.reason}`);
+      }
+    }
 
     // Limit changes per tick for performance
     if (changes.length > config.maxChangesPerTick) {
       // Shuffle and take max
       const shuffled = changes.sort(() => Math.random() - 0.5);
       return shuffled.slice(0, config.maxChangesPerTick);
+    }
+
+    return changes;
+  }
+
+  /**
+   * Execute an AI decision and return block changes
+   */
+  private executeAIDecision(decision: WorldAIDecision, perception: WorldPerception): BlockChange[] {
+    const changes: BlockChange[] = [];
+
+    if (decision.event === 'nothing' || !decision.position) {
+      return changes;
+    }
+
+    const pos = decision.position;
+
+    switch (decision.event) {
+      case 'spawn_water_spring':
+        // Create a small water source
+        changes.push({
+          position: { x: pos.x, y: pos.y, z: pos.z },
+          action: 'place',
+          newType: ItemType.WATER,
+          rule: 'ai_water_spring',
+        });
+        break;
+
+      case 'lightning_strike':
+        // Start a fire at the position
+        changes.push({
+          position: { x: pos.x, y: pos.y, z: pos.z },
+          action: 'place',
+          newType: ItemType.FIRE,
+          rule: 'ai_lightning',
+        });
+        break;
+
+      case 'plant_seeds':
+        // Scatter a few saplings around the position
+        const saplingCount = Math.floor((decision.intensity || 0.5) * 4) + 1;
+        for (let i = 0; i < saplingCount; i++) {
+          const sx = pos.x + Math.floor(Math.random() * 6 - 3);
+          const sz = pos.z + Math.floor(Math.random() * 6 - 3);
+          // Check if there's grass/dirt below
+          const below = this.callbacks.getBlockAt(sx, pos.y - 1, sz);
+          if (below === ItemType.GRASS || below === ItemType.DIRT) {
+            const above = this.callbacks.getBlockAt(sx, pos.y, sz);
+            if (above === null || above === ItemType.AIR) {
+              changes.push({
+                position: { x: sx, y: pos.y, z: sz },
+                action: 'place',
+                newType: ItemType.SAPLING,
+                rule: 'ai_plant_seeds',
+              });
+            }
+          }
+        }
+        break;
+
+      case 'growth_surge':
+        // This is handled by boosting tree growth chances in the rules
+        // For now, just log it - could add instant tree growth later
+        break;
+
+      case 'erosion':
+        // Convert stone to dirt
+        if (perception.allBlocks.some(b => b.type === ItemType.STONE)) {
+          const stoneBlocks = perception.allBlocks.filter(b => b.type === ItemType.STONE);
+          if (stoneBlocks.length > 0) {
+            const target = stoneBlocks[Math.floor(Math.random() * stoneBlocks.length)];
+            changes.push({
+              position: target.position,
+              action: 'remove',
+              oldType: ItemType.STONE,
+              rule: 'ai_erosion',
+            });
+            changes.push({
+              position: target.position,
+              action: 'place',
+              newType: ItemType.DIRT,
+              rule: 'ai_erosion',
+            });
+          }
+        }
+        break;
     }
 
     return changes;
@@ -346,7 +490,6 @@ export class WorldMind {
 
     // Update last player position
     memory.lastPlayerPosition = perception.playerPosition;
-    memory.tickCount = this.state.tickCount;
   }
 
   /**

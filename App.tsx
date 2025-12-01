@@ -37,6 +37,16 @@ import { createWorldMind, WorldMind, WorldMindCallbacks } from './services/ai/wo
 import { generateAgentPlan, chatWithTools, generateBehaviorScript } from './services/geminiService';
 import { logInfo, logSystem, logAI, logError, logWarn } from './components/ConsolePanel';
 
+// Map UI slot index to ItemType for block placement
+const SLOT_TO_ITEM: ItemType[] = [
+  ItemType.GRASS,   // Slot 0
+  ItemType.DIRT,    // Slot 1
+  ItemType.STONE,   // Slot 2
+  ItemType.WOOD,    // Slot 3
+  ItemType.LEAF,    // Slot 4
+  ItemType.PLANK,   // Slot 5
+];
+
 // ============================================================================
 // MAIN APP COMPONENT - Codify / Trinity Engine
 // ============================================================================
@@ -415,6 +425,18 @@ function App() {
               addLog(logInfo(`🌰 Sapling dropped at (${event.position.x}, ${event.position.z})`, 'world'));
             } else if (event.type === 'tree_grow') {
               addLog(logInfo(`🌳 Tree grew at (${event.position.x}, ${event.position.z})!`, 'world'));
+            } else if (event.type === 'water_flow') {
+              addLog(logInfo(`💧 Water flowed at (${event.position.x}, ${event.position.y}, ${event.position.z})`, 'world'));
+            } else if (event.type === 'fire_spread') {
+              addLog(logInfo(`🔥 Fire at (${event.position.x}, ${event.position.y}, ${event.position.z})`, 'world'));
+            } else if (event.type === 'ai_water_spring') {
+              addLog(logInfo(`🌊 A spring bubbles up at (${event.position.x}, ${event.position.z})!`, 'world'));
+            } else if (event.type === 'ai_lightning') {
+              addLog(logInfo(`⚡ Lightning strikes at (${event.position.x}, ${event.position.z})!`, 'world'));
+            } else if (event.type === 'ai_plant_seeds') {
+              addLog(logInfo(`🌾 Seeds scatter in the wind near (${event.position.x}, ${event.position.z})`, 'world'));
+            } else if (event.type === 'ai_erosion') {
+              addLog(logInfo(`🪨 Erosion transforms stone at (${event.position.x}, ${event.position.z})`, 'world'));
             }
           }
           // Update stats
@@ -426,18 +448,27 @@ function App() {
         },
       };
 
-      // Create and start the WorldMind
+      // Create and start the WorldMind with local AI (no API key needed!)
       const mind = createWorldMind(callbacks, {
         tickRate: 1000, // 1 second between ticks
         perceptionRadius: 32, // Perceive 32 blocks around player
         maxChangesPerTick: 15, // Max 15 block changes per tick
+        // Local AI runs in-browser - no API key required
+        useLocalModel: true,
       });
       worldMindRef.current = mind;
 
       // Start the world's consciousness
       mind.start();
       setWorldMindStats((prev) => ({ ...prev, isActive: true }));
-      addLog(logSystem('🌍 WorldMind awakened - the world is now alive', 'world'));
+
+      // Log AI status
+      const aiStats = mind.getWorldAI().getStats();
+      if (aiStats.modelLoading) {
+        addLog(logSystem('🌍 WorldMind awakened - downloading local AI model...', 'world'));
+      } else {
+        addLog(logSystem('🌍 WorldMind awakened - local AI embedded in the world', 'world'));
+      }
     }, 2000); // Wait 2 seconds for engine to initialize
 
     return () => {
@@ -1110,7 +1141,7 @@ Block types: 1=Grass, 2=Dirt, 3=Stone, 4=Wood, 5=Leaf, 6=Plank
         ref={engineRef}
         onStatsUpdate={handleStatsUpdate}
         onLockChange={setIsLocked}
-        selectedBlockIndex={selectedSlot}
+        selectedItemType={SLOT_TO_ITEM[selectedSlot] || ItemType.GRASS}
         onBlockBreak={handleBlockBreak}
         checkCanPlace={checkCanPlace}
         onBlockPlace={handleBlockPlace}
